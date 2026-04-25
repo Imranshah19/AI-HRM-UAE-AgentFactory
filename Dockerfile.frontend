@@ -1,0 +1,63 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# AI-HRMS — Frontend Dockerfile (Next.js)
+# Multi-stage: development (hot-reload) + production (standalone output)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ─── Base ─────────────────────────────────────────────────────────────────────
+# WINDOWS DNS FIX: If Docker cannot pull node:20-alpine, run:
+#   docker pull node:20-alpine
+# Or override via build arg:
+#   docker-compose build --build-arg NODE_IMAGE=node:20-alpine
+ARG NODE_IMAGE=node:20-alpine
+FROM ${NODE_IMAGE} AS base
+
+ENV NODE_ENV=development
+
+RUN apk add --no-cache libc6-compat curl
+WORKDIR /app
+
+# ─── Dependencies ─────────────────────────────────────────────────────────────
+FROM base AS dependencies
+
+COPY package.json package-lock.json* ./
+RUN npm install --legacy-peer-deps
+
+# ─── Development ──────────────────────────────────────────────────────────────
+FROM base AS development
+
+COPY --from=dependencies /app/node_modules ./node_modules
+# Source is mounted as a volume in docker-compose
+
+EXPOSE 3000
+CMD ["npm", "run", "dev"]
+
+# ─── Builder ──────────────────────────────────────────────────────────────────
+FROM base AS builder
+
+ENV NODE_ENV=production
+COPY --from=dependencies /app/node_modules ./node_modules
+COPY . .
+
+# Next.js config lives in ./frontend/ so use --dir flag
+# Output: ./frontend/.next/standalone
+RUN npm run build
+
+# ─── Production ───────────────────────────────────────────────────────────────
+FROM base AS production
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Create non-root user
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser  --system --uid 1001 nextjs
+
+# Standalone output is at frontend/.next/standalone
+COPY --from=builder /app/frontend/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/frontend/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/frontend/.next/static ./frontend/.next/static
+
+USER nextjs
+EXPOSE 3000
+
+CMD ["node", "server.js"]

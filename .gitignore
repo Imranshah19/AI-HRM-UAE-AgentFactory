@@ -1,0 +1,139 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# AI-HRMS — .gitignore
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ─── Windows reserved device name (created by accidental curl redirection) ────
+nul
+
+# ─── Environment & Secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.staging
+*.pem
+*.key
+*.cert
+firebase-service-account.json
+service-account*.json
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+share/python-wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.virtualenv/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+nosetests.xml
+test-results/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+
+# ─── Node / Next.js ───────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Next.js
+.next/
+out/
+build/
+
+# Next.js cache
+.swc/
+
+# ─── IDEs & Editors ───────────────────────────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+*.sublime-project
+*.sublime-workspace
+.vim/
+.editorconfig.local
+*.swp
+*.swo
+*~
+
+# ─── OS Files ─────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ─── Docker ───────────────────────────────────────────────────────────────────
+# Keep docker-compose.yml but ignore overrides
+docker-compose.override.yml
+docker-compose.local.yml
+
+# ─── Uploads & Media ──────────────────────────────────────────────────────────
+uploads/
+media/
+*.pdf
+# Allow sample fixtures
+!backend/tests/fixtures/*.pdf
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+log/
+celerybeat-schedule
+celerybeat.pid
+
+# ─── Alembic ──────────────────────────────────────────────────────────────────
+# Keep migration scripts but not the compiled versions
+alembic/versions/__pycache__/
+
+# ─── ML Models & Data ─────────────────────────────────────────────────────────
+*.pkl
+*.joblib
+*.h5
+*.model
+*.pt
+*.pth
+models/weights/
+data/raw/
+data/processed/
+
+# ─── Miscellaneous ────────────────────────────────────────────────────────────
+*.bak
+*.tmp
+*.temp
+.cache/
+.parcel-cache/
+.turbo/

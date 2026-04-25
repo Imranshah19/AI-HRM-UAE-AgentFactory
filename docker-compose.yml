@@ -1,0 +1,237 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# AI-HRMS — Local Development Docker Compose
+# ══════════════════════════════════════════════════════════════════════════════
+# Usage:
+#   docker-compose up -d          → start all services
+#   docker-compose up backend     → start only backend
+#   docker-compose logs -f        → tail all logs
+#   docker-compose down -v        → stop and remove volumes
+#
+# WINDOWS DNS FIX: If images fail to pull, run run_local.ps1 which
+# auto-fixes Docker daemon DNS before starting services.
+# ══════════════════════════════════════════════════════════════════════════════
+
+networks:
+  hrms_network:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: hrms_br0
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploads_data:
+    driver: local
+
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: hrms_postgres
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hrms_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hrms_password}
+      POSTGRES_DB: ${POSTGRES_DB:-hrms_db}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    networks:
+      - hrms_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hrms_user} -d ${POSTGRES_DB:-hrms_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: hrms_redis
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - hrms_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── FastAPI Backend ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+      args:
+        PYTHON_IMAGE: python:3.11-slim
+    container_name: hrms_backend
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app
+    environment:
+      - APP_ENV=development
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-hrms_user}:${POSTGRES_PASSWORD:-hrms_password}@postgres:5432/${POSTGRES_DB:-hrms_db}
+      - DATABASE_SYNC_URL=postgresql://${POSTGRES_USER:-hrms_user}:${POSTGRES_PASSWORD:-hrms_password}@postgres:5432/${POSTGRES_DB:-hrms_db}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev_secret_change_in_production_key}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - BACKEND_URL=${BACKEND_URL:-http://localhost:8000}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
+      - STORAGE_BACKEND=local
+      - LOCAL_UPLOAD_DIR=/uploads
+      - FIRST_SUPERADMIN_EMAIL=${FIRST_SUPERADMIN_EMAIL:-admin@hrms.local}
+      - FIRST_SUPERADMIN_PASSWORD=${FIRST_SUPERADMIN_PASSWORD:-Admin@1234!}
+      - FIRST_SUPERADMIN_FIRST_NAME=${FIRST_SUPERADMIN_FIRST_NAME:-System}
+      - FIRST_SUPERADMIN_LAST_NAME=${FIRST_SUPERADMIN_LAST_NAME:-Admin}
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY:-}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - uploads_data:/uploads
+    networks:
+      - hrms_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Celery Worker ────────────────────────────────────────────────────────────
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+      args:
+        PYTHON_IMAGE: python:3.11-slim
+    container_name: hrms_celery_worker
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4 -Q default,payroll,notifications,reports
+    environment:
+      - APP_ENV=development
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-hrms_user}:${POSTGRES_PASSWORD:-hrms_password}@postgres:5432/${POSTGRES_DB:-hrms_db}
+      - DATABASE_SYNC_URL=postgresql://${POSTGRES_USER:-hrms_user}:${POSTGRES_PASSWORD:-hrms_password}@postgres:5432/${POSTGRES_DB:-hrms_db}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev_secret_change_in_production_key}
+      - STORAGE_BACKEND=local
+      - LOCAL_UPLOAD_DIR=/uploads
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY:-}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - ./backend:/app
+      - uploads_data:/uploads
+    networks:
+      - hrms_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Celery Beat (Scheduler) ───────────────────────────────────────────────────
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+      args:
+        PYTHON_IMAGE: python:3.11-slim
+    container_name: hrms_celery_beat
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    command: celery -A app.worker.celery_app beat --loglevel=info
+    environment:
+      - APP_ENV=development
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-hrms_user}:${POSTGRES_PASSWORD:-hrms_password}@postgres:5432/${POSTGRES_DB:-hrms_db}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    volumes:
+      - ./backend:/app
+    networks:
+      - hrms_network
+    depends_on:
+      - redis
+      - postgres
+
+  # ── Next.js Frontend ─────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      target: development
+      args:
+        NODE_IMAGE: node:20-alpine
+    container_name: hrms_frontend
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    command: npm run dev
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_APP_NAME=AI-HRMS
+      - BACKEND_INTERNAL_URL=http://backend:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - hrms_network
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
