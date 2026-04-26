@@ -1,10 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -149,7 +146,7 @@ export default function UAEGroupDashboardPage() {
       {/* ── Agent status mini-widget ─────────────────────────────────────────── */}
       <div className={`rounded-lg border p-4 ${darkMode ? "bg-gray-800 border-gray-700" : "bg-white"}`}>
         <h2 className="text-lg font-semibold mb-3">
-          {isAr ? "حالة الوكلاء الذكيين (15 وكيل)" : "AI Agents Status (15 Agents)"}
+          {isAr ? "حالة الوكلاء الذكيين — LangGraph (13 وكيل)" : "AI Agents — LangGraph (13 Agents)"}
         </h2>
         <div className="grid grid-cols-3 md:grid-cols-5 gap-2">
           {AGENT_NAMES.map((agent) => (
@@ -246,19 +243,17 @@ function AlertRow({ icon, message, company, level }: {
 }
 
 const AGENT_NAMES = [
-  { key: "openclaw", en: "OpenClaw", ar: "أوبن كلو" },
-  { key: "paperclip", en: "Paperclip", ar: "ورقة مشبك" },
-  { key: "onboarding", en: "Onboarding", ar: "التأهيل" },
-  { key: "documents", en: "Documents", ar: "المستندات" },
-  { key: "payroll", en: "Payroll", ar: "الرواتب" },
-  { key: "wps", en: "WPS", ar: "حماية الأجور" },
-  { key: "gratuity", en: "Gratuity", ar: "المكافأة" },
-  { key: "leave", en: "Leave", ar: "الإجازات" },
-  { key: "attendance", en: "Attendance", ar: "الحضور" },
-  { key: "contract", en: "Contracts", ar: "العقود" },
-  { key: "insurance", en: "Insurance", ar: "التأمين" },
-  { key: "air_ticket", en: "Air Ticket", ar: "التذاكر" },
-  { key: "emiratisation", en: "Emiratisation", ar: "التوطين" },
-  { key: "offboarding", en: "Offboarding", ar: "إنهاء الخدمة" },
-  { key: "chatbot", en: "HR Chat", ar: "الدردشة" },
+  { key: "leave",          en: "Leave",          ar: "الإجازات" },
+  { key: "payroll",        en: "Payroll",         ar: "الرواتب" },
+  { key: "attendance",     en: "Attendance",      ar: "الحضور" },
+  { key: "onboarding",     en: "Onboarding",      ar: "التأهيل" },
+  { key: "document",       en: "Documents",       ar: "المستندات" },
+  { key: "gratuity",       en: "Gratuity",        ar: "المكافأة" },
+  { key: "wps",            en: "WPS",             ar: "حماية الأجور" },
+  { key: "contract",       en: "Contracts",       ar: "العقود" },
+  { key: "insurance",      en: "Insurance",       ar: "التأمين" },
+  { key: "air_ticket",     en: "Air Ticket",      ar: "التذاكر" },
+  { key: "emiratisation",  en: "Emiratisation",   ar: "التوطين" },
+  { key: "offboarding",    en: "Offboarding",     ar: "إنهاء الخدمة" },
+  { key: "chatbot",        en: "HR Chat",         ar: "الدردشة" },
 ];
