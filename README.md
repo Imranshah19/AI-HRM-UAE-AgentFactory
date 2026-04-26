@@ -1,415 +1,372 @@
-# AI-HRMS — Intelligent Human Resource Management System
+# UAE AI-HRM Agent Factory
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi)](https://fastapi.tiangolo.com)
-[![Next.js](https://img.shields.io/badge/Next.js-14-black?logo=next.js)](https://nextjs.org)
-[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python)](https://python.org)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-336791?logo=postgresql)](https://postgresql.org)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)](https://docker.com)
+**Enterprise-grade AI-powered HR management system for UAE group of companies.**  
+Built on LangGraph + Claude Opus 4.7 with full UAE Labour Law compliance (Federal Decree-Law No. 33/2021).
 
-A full-featured, AI-powered Human Resource Management System built for modern organizations. AI-HRMS covers the complete employee lifecycle — from recruitment through retirement — in a single, multi-tenant platform. It combines a high-performance FastAPI backend, a responsive Next.js frontend, and OpenAI-powered intelligence to deliver actionable workforce insights.
-
----
-
-## Features
-
-- **Employee Management** — Complete employee profiles, org chart, document vault, salary structures, and employment lifecycle management
-- **Attendance & Shifts** — Clock-in/clock-out with GPS verification, shift management, overtime calculation, and a real-time WebSocket attendance feed
-- **Leave Management** — Multi-type leave policies, accrual rules, approval workflows, team calendar, and public holiday management
-- **Payroll Engine** — Automated payroll runs with Pakistani FBR tax slabs, configurable salary components, and one-click payslip generation
-- **Recruitment Pipeline** — Job postings, public job board, multi-stage candidate pipeline, interview scheduling, and AI-powered CV scoring
-- **Performance Management** — Appraisal cycles, 360-degree reviews, goal tracking with progress updates, and department-level analytics
-- **Training & Development** — Training program catalog, enrollment management, completion tracking, and material uploads
-- **Asset Management** — Asset registry, assignment/return workflow, and per-employee asset history
-- **AI Attrition Prediction** — Machine learning model predicts employee flight risk with contributing factor explanations
-- **AI HR Chatbot** — Natural language HR assistant answers workforce questions, generates reports, and surfaces insights
-- **AI Performance Analysis** — Automatically identifies top performers, skill gaps, and improvement areas across appraisal cycles
-- **Departments & Designations** — Hierarchical org structure with department heads and nested sub-departments
-- **Notifications** — In-app and real-time WebSocket notifications for all workflow events; email + SMS via SendGrid and Twilio
-- **Reports & Analytics** — Headcount, turnover, payroll cost, attendance, leave utilization, and recruitment funnel reports with export to CSV/Excel
-- **Multi-Tenant Architecture** — Full data isolation per tenant with subdomain routing and per-tenant configuration
-- **RBAC Permissions** — 9 granular roles from SUPER_ADMIN to EMPLOYEE with permission-level access control
+[![Python](https://img.shields.io/badge/Python-3.11+-blue)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green)](https://fastapi.tiangolo.com)
+[![LangGraph](https://img.shields.io/badge/LangGraph-1.1.9-orange)](https://github.com/langchain-ai/langgraph)
+[![Claude](https://img.shields.io/badge/Claude-Opus%204.7-purple)](https://anthropic.com)
+[![Next.js](https://img.shields.io/badge/Next.js-14-black)](https://nextjs.org)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 ---
 
-## Tech Stack
+## Overview
+
+The UAE AI-HRM Agent Factory is a multi-tenant HR automation platform built for UAE Group of Companies. It replaces manual HR processes with 13 intelligent LangGraph agents, each a specialist in a specific HR domain under UAE law.
+
+**Key capabilities:**
+- Multi-company group management (Dubai, Abu Dhabi, Sharjah, Free Zones)
+- Full WPS (Wage Protection System) SIF file generation and submission tracking
+- Emiratisation quota monitoring with NAFIS integration (AED 96,000/slot fine risk)
+- Automatic document expiry alerts (Emirates ID, Visa, Labour Card, Passport)
+- Ramadan mode — 6-hour working day detection and payroll adjustment
+- Multilingual HR chatbot: English, Arabic, Urdu, Hindi, Tagalog
+- Mock mode — all 13 agents work without `ANTHROPIC_API_KEY`; set key for live Claude AI
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   FastAPI Backend                        │
+│              /api/v1/uae/* (8 sub-routers)              │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────┐
+│          LangGraph Master Orchestrator (graph.py)        │
+│     run_uae_task(task_type, company_id, payload)         │
+│     14 task types → 13 specialist sub-graphs             │
+└──┬──────┬──────┬──────┬──────┬──────┬──────┬───────────┘
+   │      │      │      │      │      │      │
+ leave payroll attend onboard document gratuity  ...
+   │      │      │      │      │      │      │
+┌──▼──────▼──────▼──────▼──────▼──────▼──────▼──────────┐
+│          Anthropic SDK — claude-opus-4-7                 │
+│          thinking: {type: "adaptive"}                    │
+│          Mock fallback when no API key                   │
+└────────────────────────────────────────────────────────┘
+```
+
+### Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Backend API | FastAPI 0.115, Python 3.11, SQLAlchemy 2.0 (async) |
-| Database | PostgreSQL 15 |
-| Cache / Queue Broker | Redis 7 |
-| Background Tasks | Celery 5 + RedBeat scheduler |
-| Frontend | Next.js 14, React 18, TypeScript |
-| UI Components | shadcn/ui, Tailwind CSS |
-| State Management | TanStack Query v5, Zustand |
-| Authentication | JWT (access + refresh tokens), HTTP-only cookies |
-| AI / LLM | OpenAI GPT-4o-mini, scikit-learn (attrition model) |
-| Real-time | WebSocket (FastAPI native) |
-| File Storage | Local volume (S3-compatible swap-out) |
-| Email | SendGrid |
-| SMS | Twilio |
-| Containerization | Docker, Docker Compose |
-| Reverse Proxy | Nginx |
-| SSL | Let's Encrypt (Certbot) |
-| Migrations | Alembic |
-| Testing | pytest, pytest-asyncio, httpx |
+| AI Orchestration | LangGraph 1.1.9 StateGraph |
+| AI Model | Claude Opus 4.7 (adaptive thinking) |
+| AI SDK | Anthropic Python SDK >= 0.40.0 |
+| Backend | FastAPI 0.115 + Python 3.11 |
+| Database | PostgreSQL 15 (asyncpg + SQLAlchemy 2.0) |
+| Migrations | Alembic (auto-run on container start) |
+| Cache / Queue | Redis 7 + Celery 5.4 |
+| Frontend | Next.js 14 (App Router, TypeScript) |
+| UI | Tailwind CSS + shadcn/ui |
+| Containerisation | Docker + Docker Compose |
+| Logging | structlog + Redis log ring (1,000 entries) |
 
 ---
 
-## Quick Start (Docker — 3 commands)
+## 13 UAE AI Agents
+
+Each agent is an independent LangGraph `StateGraph` with typed state, conditional edges, and a `run_agent()` async interface. Claude is invoked only at decision nodes when `ANTHROPIC_API_KEY` is set.
+
+| # | Agent | Task Types | UAE Law / Domain |
+|---|-------|-----------|-----------------|
+| 1 | **Leave** | `leave_apply`, `leave_balance` | Federal Decree-Law 33/2021 — 9 leave types |
+| 2 | **Payroll** | `payroll` | ILOE deduction, overtime 125%/150%, Ramadan hours |
+| 3 | **Attendance** | `attendance` | 8hr/day standard, 6hr Ramadan, GPS/QR/WiFi/IP verify |
+| 4 | **Onboarding** | `onboarding` | Emirates ID, Labour card, WPS registration, ILOE enroll |
+| 5 | **Document** | `document_check` | Visa/Passport/EID expiry — CRITICAL/URGENT/WARNING tiers |
+| 6 | **Gratuity** | `gratuity` | 21 days/yr (<=5yr), 30 days/yr (>5yr), 2yr salary cap |
+| 7 | **WPS** | `wps` | MOHRE SIF XML generator, IBAN validation, deadline alerts |
+| 8 | **Contract** | `contract` | Limited contract expiry, notice period, renewal alerts |
+| 9 | **Insurance** | `insurance` | DHA/HAAD medical + ILOE compliance tracker |
+| 10 | **Air Ticket** | `air_ticket` | Annual home-country ticket after 1yr service |
+| 11 | **Emiratisation** | `emiratisation` | 2% Nafis quota, AED 96,000/slot fine risk calculation |
+| 12 | **Offboarding** | `offboarding` | 14-day settlement law, gratuity + WPS final pay |
+| 13 | **HR Chatbot** | `chat` | EN / AR / UR / HI / TL — 5 language support |
+
+### Agent Call Pattern
+
+```python
+from app.agents.uae.graph import run_uae_task
+
+result = await run_uae_task(
+    task_type="leave_apply",
+    company_id="co-001",
+    employee_id="emp-001",
+    payload={
+        "leave_type": "annual",
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-10",
+    },
+)
+# result = {"decision": "approve", "balance_remaining": 20, "api_mode": "live", ...}
+```
+
+---
+
+## UAE Labour Law Compliance
+
+| Regulation | Implementation |
+|-----------|---------------|
+| Federal Decree-Law No. 33/2021 | Leave entitlements, contract types, gratuity formula |
+| MOHRE WPS | SIF XML generation, IBAN validation (AE format), deadline tracking |
+| ILOE (Oct 2023) | AED 5/month (basic < 16,000) or AED 10/month (>= 16,000) |
+| Emiratisation | 2% annual quota, AED 96,000 fine per unfilled slot |
+| Ramadan | Automatic 6-hr/day detection (2025-2027 periods built-in) |
+| Gratuity cap | Maximum 24 months' basic salary |
+| Offboarding | 14-day final settlement law |
+| Overtime | Max 2 hrs/day — 125% normal, 150% night/Friday/holiday |
+| Leave types | Annual (30d), Sick (90d), Maternity (60d), Paternity (5d), Bereavement, Hajj, Study, Parental, Unpaid |
+
+---
+
+## Database Schema (10 UAE Tables)
+
+All tables are additive — zero modifications to existing base HRM tables.
+
+```
+companies                  — Multi-company group structure
+employees_uae_profile      — UAE-specific data (extends existing employees)
+salary_structure_uae       — AED salary breakdown (basic + allowances)
+payroll_uae                — Monthly payroll records with WPS flag
+wps_submissions            — SIF file submission tracking + MOHRE confirmations
+gratuity_ledger            — Accrual entries + final settlement records
+leave_balances_uae         — 9 leave types per employee per year
+documents_tracker          — Expiry tracking + tiered alert flags
+emiratisation_records      — Monthly quota compliance snapshots
+agent_logs_uae             — LangGraph agent execution audit log
+```
+
+Applied via Alembic — runs automatically on container start:
 
 ```bash
-git clone https://github.com/your-org/ai-hrms.git && cd ai-hrms
-cp .env.example .env   # Edit with your settings (see Environment Variables below)
+alembic upgrade head && uvicorn app.main:app ...
+```
+
+---
+
+## API Routes
+
+All UAE routes are under `/api/v1/uae/` — registered non-destructively in the master router.
+
+```
+GET    /api/v1/uae/agent/status                    Agent health + mode (live/mock)
+GET    /api/v1/uae/agent/logs?limit=50             Redis execution logs
+POST   /api/v1/uae/agent/chat                      Multilingual HR chatbot
+
+POST   /api/v1/uae/agent/trigger/payroll/{company_id}
+POST   /api/v1/uae/agent/trigger/wps-validate/{company_id}
+POST   /api/v1/uae/agent/trigger/wps-sif/{company_id}
+POST   /api/v1/uae/agent/trigger/documents-check
+POST   /api/v1/uae/agent/trigger/attendance-report
+POST   /api/v1/uae/agent/trigger/emiratisation-check
+POST   /api/v1/uae/agent/trigger/gratuity
+POST   /api/v1/uae/agent/trigger/leave-balance
+POST   /api/v1/uae/agent/trigger/insurance-check/{company_id}
+POST   /api/v1/uae/agent/trigger/contract-check/{company_id}
+
+POST   /api/v1/uae/webhooks/employee/joined
+POST   /api/v1/uae/webhooks/employee/resigned
+POST   /api/v1/uae/webhooks/employee/terminated
+POST   /api/v1/uae/webhooks/leave/applied
+POST   /api/v1/uae/webhooks/attendance/checkin
+POST   /api/v1/uae/webhooks/attendance/checkout
+POST   /api/v1/uae/webhooks/document/uploaded
+POST   /api/v1/uae/webhooks/contract/expiring
+```
+
+Interactive docs: `http://localhost:8000/docs`
+
+---
+
+## Frontend — 6 UAE Dashboard Pages
+
+All pages support **Arabic RTL toggle** (`EN | عربي`), AED currency, and Green/Yellow/Red status colours.
+
+| Route | Page | Features |
+|-------|------|---------|
+| `/uae/group-dashboard` | Group Overview | All companies, WPS status, Emiratisation %, critical alerts |
+| `/uae/company/[id]/dashboard` | Company Dashboard | Per-company metrics, payroll summary, document alerts |
+| `/uae/employees/[id]/profile` | Employee Profile | UAE docs, visa/EID expiry, leave balances, gratuity |
+| `/uae/payroll` | Payroll | AED payslips, ILOE deduction, WPS readiness, Ramadan mode |
+| `/uae/compliance` | Compliance | WPS, Emiratisation, documents, contracts — all in one view |
+| `/uae/agent-dashboard` | Agent Control | 13 LangGraph agents status, execution logs, manual triggers |
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Docker Desktop 4.x
+- Docker Compose v2
+
+### 1. Clone
+
+```bash
+git clone https://github.com/Imranshah19/AI-HRM-UAE-AgentFactory.git
+cd AI-HRM-UAE-AgentFactory
+```
+
+### 2. Environment
+
+```bash
+cp .env.example backend/.env
+```
+
+Edit `backend/.env`:
+
+```env
+ANTHROPIC_API_KEY=sk-ant-...        # leave blank for mock mode
+JWT_SECRET_KEY=<openssl rand -hex 64>
+```
+
+`ANTHROPIC_API_KEY` is optional — all 13 agents work in mock mode without it.
+
+### 3. Start
+
+```bash
 docker-compose up -d
 ```
 
-Then open:
-- **Frontend:** http://localhost:3000
-- **API Docs (Swagger):** http://localhost:8000/api/v1/docs
-- **API Docs (Redoc):** http://localhost:8000/api/v1/redoc
+This starts: PostgreSQL → Redis → Backend (runs `alembic upgrade head` then uvicorn) → Celery Worker → Celery Beat → Next.js Frontend.
 
-**Demo credentials:** `demo@hrms.local` / `Demo@1234!`
+### 4. Open
 
-After the containers start, run the first-time setup:
+| Service | URL |
+|---------|-----|
+| Frontend | http://localhost:3000 |
+| API Docs | http://localhost:8000/docs |
+| UAE Routes | http://localhost:8000/docs#/UAE%20AI-HRM |
 
-```bash
-# Apply database migrations
-docker-compose exec backend alembic upgrade head
-
-# Seed superadmin (uses values from .env)
-docker-compose exec backend python -m scripts.seed_superadmin
-```
-
----
-
-## Environment Variables
-
-Copy `.env.example` to `.env` and set the following key variables:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `POSTGRES_USER` | Yes | PostgreSQL username |
-| `POSTGRES_PASSWORD` | Yes | PostgreSQL password (use a strong random value) |
-| `POSTGRES_DB` | Yes | Database name (default: `hrms_db`) |
-| `JWT_SECRET_KEY` | Yes | Secret for signing JWTs — generate with `openssl rand -hex 64` |
-| `SECRET_KEY` | Yes | Application secret — generate with `openssl rand -hex 32` |
-| `REDIS_PASSWORD` | Yes | Redis auth password |
-| `FRONTEND_URL` | Yes | Public URL of the frontend (e.g., `https://your-domain.com`) |
-| `BACKEND_URL` | Yes | Public URL of the API (e.g., `https://api.your-domain.com`) |
-| `CORS_ORIGINS` | Yes | Comma-separated allowed origins |
-| `FIRST_SUPERADMIN_EMAIL` | Yes | Email for the seeded superadmin account |
-| `FIRST_SUPERADMIN_PASSWORD` | Yes | Password for the seeded superadmin account |
-| `SENDGRID_API_KEY` | No | SendGrid key for transactional emails |
-| `TWILIO_ACCOUNT_SID` | No | Twilio SID for SMS notifications |
-| `TWILIO_AUTH_TOKEN` | No | Twilio auth token |
-| `OPENAI_API_KEY` | No | OpenAI API key for AI features (attrition, chatbot, CV scoring) |
-| `OPENAI_MODEL` | No | Model name (default: `gpt-4o-mini`) |
-| `STORAGE_BACKEND` | No | `local` (default) or `s3` |
-| `AWS_ACCESS_KEY_ID` | No | Required if `STORAGE_BACKEND=s3` |
-| `AWS_SECRET_ACCESS_KEY` | No | Required if `STORAGE_BACKEND=s3` |
-| `AWS_S3_BUCKET` | No | S3 bucket name for file uploads |
-
----
-
-## Module Overview
-
-| Module | Key Features |
-|--------|-------------|
-| **Auth** | JWT login/refresh/logout, profile management, password change, RBAC enforcement |
-| **Employees** | Full employee lifecycle, org chart, salary management, document uploads, CSV/Excel export |
-| **Departments** | Hierarchical structure, department heads, employee count reporting |
-| **Designations** | Job titles linked to departments, grade levels |
-| **Attendance** | GPS check-in/out, shift assignment, overtime tracking, manual HR adjustments, live WebSocket feed |
-| **Leave** | Multi-type leave policies, accrual, carry-forward, team calendar, public holidays, approval workflow |
-| **Payroll** | Automated calculation, Pakistani FBR tax slabs, allowances/deductions, payslip PDF generation |
-| **Recruitment** | Job postings, public board, multi-stage pipeline, interview scheduling, offer letters, AI CV scoring |
-| **Performance** | Appraisal cycles, self + manager review, goal tracking, AI-powered cycle analysis |
-| **Training** | Program catalog, enrollment, capacity limits, completion tracking, material library |
-| **Assets** | Asset registry, assignment/return workflow, condition tracking, employee asset history |
-| **Notifications** | Real-time in-app notifications via WebSocket, email, and SMS triggers |
-| **Reports** | 8 built-in reports (headcount, turnover, payroll, attendance, leave, recruitment, training), CSV/Excel export |
-| **AI Features** | Attrition risk prediction, performance analysis, HR chatbot, workforce analytics, CV scoring |
-
----
-
-## API Documentation
-
-| Interface | URL | Description |
-|-----------|-----|-------------|
-| Swagger UI | http://localhost:8000/api/v1/docs | Interactive API explorer |
-| Redoc | http://localhost:8000/api/v1/redoc | Clean API reference |
-| OpenAPI JSON | http://localhost:8000/api/v1/openapi.json | Machine-readable schema |
-
-For the full API reference with all endpoints, see [docs/API_REFERENCE.md](docs/API_REFERENCE.md).
+Default login: `admin@hrms.local` / `Admin@1234!`
 
 ---
 
 ## Project Structure
 
 ```
-ai-hrms/
-├── backend/                        # FastAPI application
+AI-HRM-UAE-AgentFactory/
+├── backend/
 │   ├── app/
-│   │   ├── main.py                 # Application entry point, CORS, routers
-│   │   ├── core/
-│   │   │   ├── config.py           # Settings (pydantic-settings)
-│   │   │   ├── security.py         # JWT helpers, password hashing
-│   │   │   ├── database.py         # Async SQLAlchemy engine + session
-│   │   │   └── dependencies.py     # FastAPI dependency injection
-│   │   ├── models/                 # SQLAlchemy ORM models
-│   │   │   ├── tenant.py
-│   │   │   ├── user.py
-│   │   │   ├── employee.py
-│   │   │   ├── department.py
-│   │   │   ├── attendance.py
+│   │   ├── agents/uae/              # 13 LangGraph agents
+│   │   │   ├── graph.py             # Master orchestrator + Claude helpers
 │   │   │   ├── leave.py
 │   │   │   ├── payroll.py
-│   │   │   ├── recruitment.py
-│   │   │   ├── performance.py
-│   │   │   ├── training.py
-│   │   │   ├── asset.py
-│   │   │   └── notification.py
-│   │   ├── schemas/                # Pydantic request/response schemas
-│   │   ├── api/
-│   │   │   └── v1/
-│   │   │       ├── auth.py
-│   │   │       ├── employees.py
-│   │   │       ├── departments.py
-│   │   │       ├── designations.py
-│   │   │       ├── attendance.py
-│   │   │       ├── leave.py
-│   │   │       ├── payroll.py
-│   │   │       ├── recruitment.py
-│   │   │       ├── performance.py
-│   │   │       ├── training.py
-│   │   │       ├── assets.py
-│   │   │       ├── notifications.py
-│   │   │       ├── reports.py
-│   │   │       ├── ai.py
-│   │   │       └── admin.py
-│   │   ├── services/               # Business logic layer
-│   │   │   ├── auth_service.py
-│   │   │   ├── employee_service.py
-│   │   │   ├── payroll_service.py
-│   │   │   ├── attendance_service.py
-│   │   │   ├── leave_service.py
-│   │   │   ├── recruitment_service.py
-│   │   │   ├── ai_service.py
-│   │   │   └── notification_service.py
-│   │   ├── worker/
-│   │   │   ├── celery_app.py       # Celery application factory
-│   │   │   ├── tasks/
-│   │   │   │   ├── payroll_tasks.py
-│   │   │   │   ├── notification_tasks.py
-│   │   │   │   ├── report_tasks.py
-│   │   │   │   └── ai_tasks.py
-│   │   │   └── schedules.py        # Periodic task definitions (RedBeat)
-│   │   └── websockets/
-│   │       ├── attendance_ws.py    # Real-time attendance WebSocket
-│   │       └── notifications_ws.py # Real-time notifications WebSocket
-│   ├── alembic/                    # Database migrations
-│   │   ├── versions/
-│   │   └── env.py
-│   ├── scripts/
-│   │   ├── seed_superadmin.py      # First-run superadmin seeding
-│   │   ├── init_db.sql             # PostgreSQL init script
-│   │   └── backup.sh               # Database backup script
-│   ├── tests/
-│   │   ├── conftest.py
-│   │   ├── test_auth.py
-│   │   ├── test_employees.py
-│   │   ├── test_payroll.py
-│   │   └── test_attendance.py
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── alembic.ini
-│   └── pytest.ini
-│
-├── frontend/                       # Next.js application
-│   ├── app/                        # Next.js 14 App Router
-│   │   ├── (auth)/
-│   │   │   └── login/
-│   │   ├── (dashboard)/
-│   │   │   ├── employees/
-│   │   │   ├── attendance/
-│   │   │   ├── leave/
-│   │   │   ├── payroll/
-│   │   │   ├── recruitment/
-│   │   │   ├── performance/
-│   │   │   ├── training/
-│   │   │   ├── assets/
-│   │   │   ├── reports/
-│   │   │   └── ai/
-│   │   └── public/                 # Public job board (no auth)
-│   ├── components/
-│   │   ├── ui/                     # shadcn/ui components
-│   │   ├── layouts/
-│   │   ├── charts/
-│   │   └── modules/                # Module-specific components
-│   ├── lib/
-│   │   ├── api.ts                  # Axios API client
-│   │   ├── auth.ts                 # Auth helpers
-│   │   └── utils.ts
-│   ├── hooks/                      # Custom React hooks
-│   ├── stores/                     # Zustand state stores
-│   ├── types/                      # TypeScript type definitions
-│   └── public/
-│
-├── docs/
-│   ├── API_REFERENCE.md            # Complete API endpoint reference
-│   ├── DEPLOYMENT.md               # Production deployment guide
-│   └── architecture/               # Architecture diagrams and docs
-│
-├── nginx/
-│   ├── nginx.prod.conf             # Production Nginx main config
-│   └── conf.d/
-│       └── hrms.conf               # Virtual host configuration
-│
-├── docker-compose.yml              # Development environment
-├── docker-compose.prod.yml         # Production environment
-├── Dockerfile.frontend             # Frontend Docker build
-├── .env.example                    # Environment variable template
-├── package.json                    # Frontend package manifest
-├── requirements.txt                # Python dependencies (top-level reference)
-└── README.md                       # This file
+│   │   │   ├── attendance.py
+│   │   │   ├── onboarding.py
+│   │   │   ├── document.py
+│   │   │   ├── gratuity.py
+│   │   │   ├── wps.py
+│   │   │   ├── contract.py
+│   │   │   ├── insurance.py
+│   │   │   ├── air_ticket.py
+│   │   │   ├── emiratisation.py
+│   │   │   ├── offboarding.py
+│   │   │   └── chatbot.py
+│   │   ├── api/v1/uae/              # FastAPI routers
+│   │   │   ├── router.py
+│   │   │   ├── companies_router.py
+│   │   │   ├── employees_router.py
+│   │   │   ├── payroll_router.py
+│   │   │   ├── compliance_router.py
+│   │   │   ├── leave_router.py
+│   │   │   └── attendance_router.py
+│   │   ├── triggers/uae/            # Celery + webhook triggers
+│   │   │   ├── api_trigger.py
+│   │   │   ├── webhook.py
+│   │   │   └── scheduler.py
+│   │   └── models/                  # SQLAlchemy ORM models
+│   ├── alembic/versions/            # DB migrations
+│   └── requirements.txt
+├── frontend/src/app/(dashboard)/uae/
+│   ├── group-dashboard/page.tsx
+│   ├── company/[id]/dashboard/page.tsx
+│   ├── employees/[id]/profile/page.tsx
+│   ├── payroll/page.tsx
+│   ├── compliance/page.tsx
+│   └── agent-dashboard/page.tsx
+├── docker-compose.yml
+└── .env.example
 ```
 
 ---
 
-## Screenshots
+## Environment Variables
 
-> Screenshots and demo GIFs will be added here.
+Key variables (full list in `.env.example`):
 
-| Screen | Description |
-|--------|-------------|
-| Dashboard | KPI overview — headcount, attendance %, open positions, payroll cost |
-| Employee Directory | Searchable employee list with department/status filters |
-| Attendance Live Feed | Real-time clock-in/out board with WebSocket updates |
-| Leave Calendar | Team leave calendar with monthly view |
-| Payroll Run | Step-by-step payroll processing with tax breakdown |
-| Recruitment Pipeline | Kanban-style candidate pipeline view |
-| AI Attrition Dashboard | Risk heatmap with employee risk scores and factors |
-| HR Chatbot | Conversational HR assistant with suggested actions |
+```env
+# Claude AI — leave blank for mock mode
+ANTHROPIC_API_KEY=
+
+# Database
+DATABASE_URL=postgresql+asyncpg://hrms_user:hrms_password@postgres:5432/hrms_db
+
+# Redis / Celery
+REDIS_URL=redis://redis:6379/0
+CELERY_BROKER_URL=redis://redis:6379/1
+
+# UAE Compliance Thresholds
+UAE_DOCUMENT_ALERT_CRITICAL_DAYS=7
+UAE_DOCUMENT_ALERT_URGENT_DAYS=30
+UAE_EMIRATISATION_ANNUAL_FINE_AED=96000
+UAE_GRATUITY_CAP_MONTHS=24
+```
+
+---
+
+## Celery Scheduled Jobs
+
+| Schedule | Job | Queue |
+|----------|-----|-------|
+| Daily 08:00 UAE | Document expiry check | uae_compliance |
+| Daily 09:00 UAE | Attendance daily report | uae_attendance |
+| Daily 08:30 UAE | Insurance expiry check | uae_compliance |
+| Daily 09:30 UAE | WPS deadline alerts | uae_payroll |
+| 25th monthly | Payroll generation | uae_payroll |
+| 24th monthly | Pre-payroll validation | uae_payroll |
+| 1st monthly | Emiratisation check | uae_compliance |
+| 1st monthly | Gratuity accrual update | uae_payroll |
+| Every Sunday | Contract expiry report | uae_compliance |
+| Every Sunday | Air ticket utilisation | uae_hr |
+| Daily 07:00 UAE | Ramadan mode detection | uae_attendance |
 
 ---
 
 ## Development
 
-### Prerequisites
-
-- Docker 24+ and Docker Compose v2
-- Git
-
-### Run in Development Mode
-
 ```bash
-# Start all services with hot reload
-docker-compose up -d
+# Install backend dependencies locally
+cd backend
+pip install -r requirements.txt
 
-# View logs
-docker-compose logs -f backend
+# Install LangGraph (required for local StateGraph execution)
+pip install "langgraph>=0.2.0" "anthropic>=0.40.0"
 
-# Run backend tests
-docker-compose exec backend pytest tests/ -v
+# Run backend locally (requires PostgreSQL + Redis running)
+uvicorn app.main:app --reload
 
-# Run a specific test file
-docker-compose exec backend pytest tests/test_payroll.py -v
-
-# Open a shell in the backend container
-docker-compose exec backend bash
-
-# Create a new migration after model changes
-docker-compose exec backend alembic revision --autogenerate -m "add_new_table"
-
-# Apply migrations
-docker-compose exec backend alembic upgrade head
-```
-
-### Run Frontend in Standalone Mode (without Docker)
-
-```bash
+# Run frontend locally
 cd frontend
 npm install
-cp .env.local.example .env.local   # set NEXT_PUBLIC_API_URL=http://localhost:8000
 npm run dev
+
+# Run tests (requires Docker DB)
+cd backend
+pytest tests/ -v
 ```
-
----
-
-## Production Deployment
-
-See the complete production deployment guide: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
-
-Quick summary:
-1. Ubuntu 22.04 server with Docker and Nginx installed
-2. Clone repo, populate `.env` from `.env.example`
-3. `docker compose -f docker-compose.prod.yml up -d`
-4. `docker compose -f docker-compose.prod.yml exec backend alembic upgrade head`
-5. Configure Nginx reverse proxy and SSL with Certbot
-
----
-
-## Contributing
-
-Contributions are welcome. Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/your-feature-name`
-3. Make your changes with clear, descriptive commits
-4. Write or update tests for new functionality
-5. Ensure all tests pass: `docker-compose exec backend pytest`
-6. Push to your fork: `git push origin feature/your-feature-name`
-7. Open a Pull Request against `main` with a clear description of the changes
-
-### Code Style
-
-- **Python:** Black formatter, isort imports, flake8 linting
-- **TypeScript:** ESLint + Prettier
-- **Commits:** Conventional Commits format (`feat:`, `fix:`, `docs:`, `refactor:`, etc.)
-
-### Reporting Issues
-
-Please open a GitHub Issue with:
-- A clear description of the problem
-- Steps to reproduce
-- Expected vs actual behavior
-- Relevant logs or screenshots
 
 ---
 
 ## License
 
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
-
-```
-MIT License
-
-Copyright (c) 2025 AI-HRMS Contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-```
+MIT
 
 ---
 
-## Acknowledgements
-
-- [FastAPI](https://fastapi.tiangolo.com) — modern, high-performance Python web framework
-- [Next.js](https://nextjs.org) — React framework for production
-- [shadcn/ui](https://ui.shadcn.com) — accessible component library
-- [SQLAlchemy](https://sqlalchemy.org) — Python SQL toolkit and ORM
-- [Celery](https://docs.celeryq.dev) — distributed task queue
-- [OpenAI](https://openai.com) — AI language model API
+*Built with LangGraph + Claude Opus 4.7 — UAE Federal Decree-Law No. 33/2021 compliant*
