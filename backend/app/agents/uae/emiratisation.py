@@ -1,248 +1,254 @@
 """
-Emiratisation Agent UAE — Monthly quota compliance tracking.
+Emiratisation Agent UAE — LangGraph StateGraph for Nafis quota compliance.
 
-UAE Emiratisation Law:
-  - Companies 50+ employees: mandatory Emirati quota (MOHRE)
-  - Companies 20-49 employees: sector-specific targets (from Jan 2024)
-  - Non-compliance fine: AED 6,000-7,000 per shortfall per year
-  - NAFIS programme: government subsidizes Emirati salaries
+MOHRE Emiratisation Targets (2024+):
+  Private sector companies ≥50 employees: 2% Emirati quota per year
+  Banking/finance sector: stricter targets apply
+  NAFIS program: government subsidy for Emirati private-sector hires
 
-Trigger: Monthly Celery schedule (1st of every month)
+Nodes:
+  fetch_headcount → calculate_pct → calculate_fine → send_alert
+  → identify_nafis → generate_report → log_done
+
+Fine: AED 96,000/year per unfilled Emirati slot.
+Claude recommends NAFIS-eligible roles.
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
-from typing import Any
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Optional
 
 import structlog
 
-from app.agents.uae.openclaw import get_openclaw
-
 logger = structlog.get_logger(__name__)
 
-FINE_PER_SHORTFALL_AED = Decimal("7000")  # per Emirati per year shortfall (updated 2024)
+try:
+    from langgraph.graph import StateGraph, START, END
+    from typing_extensions import TypedDict
+    LANGGRAPH_AVAILABLE = True
+except ImportError:
+    LANGGRAPH_AVAILABLE = False
+
+from app.agents.uae.graph import claude_invoke, is_live_mode
+
+ANNUAL_FINE_PER_SLOT = Decimal("96000")
+MONTHLY_FINE_PER_SLOT = ANNUAL_FINE_PER_SLOT / Decimal("12")
+QUOTA_THRESHOLD_EMPLOYEES = 50
+ANNUAL_QUOTA_PCT = Decimal("0.02")  # 2% per year
+
+if LANGGRAPH_AVAILABLE:
+    class EmiratisationState(TypedDict):
+        company_id: str
+        total_employees: int
+        emirati_employees: int
+        sector: str
+        year: int
+        current_pct: float
+        required_pct: float
+        required_emiratis: int
+        shortfall: int
+        monthly_fine_aed: str
+        annual_fine_aed: str
+        compliant: bool
+        nafis_eligible_roles: list
+        alert_sent: bool
+        report: dict
+        ai_recommendation: str
+        api_mode: str
 
 
-def get_required_emiratisation_pct(headcount: int, sector: str = "private") -> Decimal:
-    if headcount >= 50:
-        return Decimal("4.0")  # 4% target for large private sector (2024)
-    elif headcount >= 20:
-        return Decimal("2.0")  # 2% for 20-49 employees (Jan 2024)
-    return Decimal("0.0")
+def _fetch_headcount(state: dict) -> dict:
+    mock_total = state.get("total_employees") or 120
+    mock_emiratis = state.get("emirati_employees") or 2
+    return {
+        "total_employees": mock_total,
+        "emirati_employees": mock_emiratis,
+    }
 
 
-@dataclass
-class EmiratiStats:
-    company_id: str
-    record_month: int
-    record_year: int
-    total_headcount: int = 0
-    emirati_count: int = 0
-    required_percentage: Decimal = field(default_factory=lambda: Decimal("0"))
-    nafis_employees_count: int = 0
+def _calculate_pct(state: dict) -> dict:
+    total = state.get("total_employees", 0)
+    emiratis = state.get("emirati_employees", 0)
+    sector = (state.get("sector") or "general").lower()
 
-    @property
-    def emiratisation_percentage(self) -> Decimal:
-        if self.total_headcount == 0:
-            return Decimal("0")
-        return (Decimal(str(self.emirati_count)) / Decimal(str(self.total_headcount)) * 100).quantize(Decimal("0.01"))
+    if total == 0:
+        return {"current_pct": 0.0, "required_pct": 0.0, "required_emiratis": 0, "shortfall": 0, "compliant": True}
 
-    @property
-    def required_emirati_count(self) -> int:
-        return int(self.total_headcount * self.required_percentage / 100)
+    current_pct = (emiratis / total) * 100
 
-    @property
-    def compliance_gap(self) -> int:
-        return max(0, self.required_emirati_count - self.emirati_count)
+    # Required % depends on sector
+    if sector in ("banking", "finance", "financial_services"):
+        required_pct = 5.0
+    else:
+        required_pct = float(ANNUAL_QUOTA_PCT * 100)  # 2%
 
-    @property
-    def is_compliant(self) -> bool:
-        return self.compliance_gap == 0
+    required_emiratis = max(0, int((required_pct / 100) * total))
+    shortfall = max(0, required_emiratis - emiratis)
+    compliant = shortfall == 0 or total < QUOTA_THRESHOLD_EMPLOYEES
 
-    @property
-    def annual_fine_risk_aed(self) -> Decimal:
-        if self.is_compliant:
-            return Decimal("0")
-        return Decimal(str(self.compliance_gap)) * FINE_PER_SHORTFALL_AED
-
-    def to_dict(self) -> dict:
-        return {
-            "company_id": self.company_id,
-            "record_month": self.record_month,
-            "record_year": self.record_year,
-            "total_headcount": self.total_headcount,
-            "emirati_count": self.emirati_count,
-            "emiratisation_percentage": str(self.emiratisation_percentage),
-            "required_percentage": str(self.required_percentage),
-            "required_emirati_count": self.required_emirati_count,
-            "compliance_gap": self.compliance_gap,
-            "is_compliant": self.is_compliant,
-            "annual_fine_risk_aed": str(self.annual_fine_risk_aed),
-            "nafis_employees_count": self.nafis_employees_count,
-            "currency": "AED",
-        }
+    return {
+        "current_pct": round(current_pct, 2),
+        "required_pct": required_pct,
+        "required_emiratis": required_emiratis,
+        "shortfall": shortfall,
+        "compliant": compliant,
+    }
 
 
-class EmiratiisationAgent:
-    """
-    UAE Emiratisation compliance tracker.
-    Monthly checks, fine risk calculation, group reporting.
-    """
+def _calculate_fine(state: dict) -> dict:
+    shortfall = state.get("shortfall", 0)
+    if state.get("compliant") or shortfall == 0:
+        return {"monthly_fine_aed": "0.00", "annual_fine_aed": "0.00"}
 
-    def __init__(self):
-        self.claw = get_openclaw()
+    monthly = (MONTHLY_FINE_PER_SLOT * Decimal(str(shortfall))).quantize(Decimal("0.01"), ROUND_HALF_UP)
+    annual = (ANNUAL_FINE_PER_SLOT * Decimal(str(shortfall))).quantize(Decimal("0.01"), ROUND_HALF_UP)
+    return {"monthly_fine_aed": str(monthly), "annual_fine_aed": str(annual)}
 
-    async def run_monthly_check(
-        self,
-        company_id: str,
-        db=None,
-    ) -> EmiratiStats:
-        today = date.today()
-        stats = EmiratiStats(
-            company_id=company_id,
-            record_month=today.month,
-            record_year=today.year,
+
+def _send_alert(state: dict) -> dict:
+    if not state.get("compliant"):
+        logger.warning(
+            "emiratisation.non_compliant",
+            company_id=state.get("company_id"),
+            shortfall=state.get("shortfall"),
+            annual_fine=state.get("annual_fine_aed"),
+        )
+    return {"alert_sent": True}
+
+
+def _identify_nafis(state: dict) -> dict:
+    shortfall = state.get("shortfall", 0)
+    if shortfall == 0:
+        return {"nafis_eligible_roles": []}
+
+    # Typical NAFIS-eligible roles (MOHRE-approved)
+    nafis_roles = [
+        {"role": "HR Coordinator", "grade": "mid", "nafis_subsidy_aed": "8000/month"},
+        {"role": "Finance Analyst", "grade": "mid", "nafis_subsidy_aed": "8000/month"},
+        {"role": "Customer Service Rep", "grade": "junior", "nafis_subsidy_aed": "5000/month"},
+        {"role": "IT Support Specialist", "grade": "mid", "nafis_subsidy_aed": "8000/month"},
+        {"role": "Admin Officer", "grade": "junior", "nafis_subsidy_aed": "5000/month"},
+    ]
+    return {"nafis_eligible_roles": nafis_roles[:shortfall]}
+
+
+def _generate_report(state: dict) -> dict:
+    ai_recommendation = ""
+    if is_live_mode() and not state.get("compliant"):
+        prompt = (
+            f"UAE Emiratisation non-compliance: company {state.get('company_id')}, "
+            f"sector={state.get('sector')}, total={state.get('total_employees')}, "
+            f"Emirati={state.get('emirati_employees')}, required={state.get('required_emiratis')}, "
+            f"shortfall={state.get('shortfall')}, fine=AED {state.get('annual_fine_aed')}/yr. "
+            "Recommend hiring strategy and NAFIS utilization to achieve compliance."
+        )
+        ai_recommendation = claude_invoke(
+            system="You are a UAE Emiratisation (Nafis) compliance specialist.",
+            user_message=prompt,
+            max_tokens=512,
         )
 
-        if db:
-            try:
-                data = await self._load_headcount_data(db, company_id)
-                stats.total_headcount = data["total"]
-                stats.emirati_count = data["emiratis"]
-                stats.nafis_employees_count = data["nafis"]
-            except Exception as exc:
-                logger.warning("emiratisation.db_load_failed", error=str(exc))
-                self._fill_mock_stats(stats)
-        else:
-            self._fill_mock_stats(stats)
+    report = {
+        "date": date.today().isoformat(),
+        "company_id": state.get("company_id"),
+        "year": state.get("year", date.today().year),
+        "total_employees": state.get("total_employees"),
+        "emirati_employees": state.get("emirati_employees"),
+        "current_pct": state.get("current_pct"),
+        "required_pct": state.get("required_pct"),
+        "required_emiratis": state.get("required_emiratis"),
+        "shortfall": state.get("shortfall"),
+        "compliant": state.get("compliant"),
+        "monthly_fine_aed": state.get("monthly_fine_aed"),
+        "annual_fine_aed": state.get("annual_fine_aed"),
+        "nafis_eligible_roles": state.get("nafis_eligible_roles", []),
+        "currency": "AED",
+        "api_mode": state.get("api_mode"),
+    }
+    return {"report": report, "ai_recommendation": ai_recommendation}
 
-        stats.required_percentage = get_required_emiratisation_pct(stats.total_headcount)
 
-        if not stats.is_compliant:
-            logger.warning(
-                "emiratisation.non_compliant",
-                company_id=company_id,
-                gap=stats.compliance_gap,
-                fine_risk=str(stats.annual_fine_risk_aed),
-            )
+def _log_done(state: dict) -> dict:
+    logger.info(
+        "emiratisation.completed",
+        company_id=state.get("company_id"),
+        compliant=state.get("compliant"),
+        shortfall=state.get("shortfall"),
+    )
+    return {}
 
-        if db:
-            try:
-                await self._save_record(db, stats)
-            except Exception as exc:
-                logger.warning("emiratisation.save_failed", error=str(exc))
 
-        await self._log_to_redis(stats)
-        return stats
+_emiratisation_graph = None
 
-    async def generate_compliance_report(self, company_id: str, db=None) -> dict:
-        stats = await self.run_monthly_check(company_id=company_id, db=db)
-        return {
-            "company_id": company_id,
-            "report_date": date.today().isoformat(),
-            "stats": stats.to_dict(),
-            "actions_required": self._get_action_recommendations(stats),
-            "legal_basis": "MOHRE Ministerial Decree — Emiratisation Rules 2021-2024",
-        }
 
-    async def calculate_fine_risk(self, company_id: str, db=None) -> dict:
-        stats = await self.run_monthly_check(company_id=company_id, db=db)
-        return {
-            "company_id": company_id,
-            "is_compliant": stats.is_compliant,
-            "compliance_gap": stats.compliance_gap,
-            "annual_fine_risk_aed": str(stats.annual_fine_risk_aed),
-            "monthly_fine_risk_aed": str((stats.annual_fine_risk_aed / 12).quantize(Decimal("0.01"))),
-            "currency": "AED",
-            "note": f"Fine = AED {FINE_PER_SHORTFALL_AED:,.0f} per missing Emirati per year",
-        }
+def create_emiratisation_graph():
+    global _emiratisation_graph
+    if _emiratisation_graph is not None or not LANGGRAPH_AVAILABLE:
+        return _emiratisation_graph
 
-    def _get_action_recommendations(self, stats: EmiratiStats) -> list[str]:
-        actions = []
-        if not stats.is_compliant:
-            actions.append(f"Hire {stats.compliance_gap} additional Emirati employee(s) to meet {stats.required_percentage}% quota")
-            actions.append(f"Annual fine risk: AED {stats.annual_fine_risk_aed:,.0f} if gap not closed")
-            actions.append("Register eligible Emirati employees in NAFIS programme for salary subsidies")
-            actions.append("Contact MOHRE Emiratisation department for compliance guidance")
-        else:
-            actions.append("Emiratisation quota is met — maintain current Emirati headcount")
-            if stats.nafis_employees_count < stats.emirati_count:
-                actions.append("Enroll eligible Emirati employees in NAFIS for government salary subsidy")
-        return actions
+    g: StateGraph = StateGraph(EmiratisationState)
+    for name, fn in [
+        ("fetch_headcount", _fetch_headcount),
+        ("calculate_pct", _calculate_pct),
+        ("calculate_fine", _calculate_fine),
+        ("send_alert", _send_alert),
+        ("identify_nafis", _identify_nafis),
+        ("generate_report", _generate_report),
+        ("log_done", _log_done),
+    ]:
+        g.add_node(name, fn)
 
-    def _fill_mock_stats(self, stats: EmiratiStats) -> None:
-        stats.total_headcount = 55
-        stats.emirati_count = 2
-        stats.nafis_employees_count = 1
+    g.add_edge(START, "fetch_headcount")
+    g.add_edge("fetch_headcount", "calculate_pct")
+    g.add_edge("calculate_pct", "calculate_fine")
+    g.add_edge("calculate_fine", "send_alert")
+    g.add_edge("send_alert", "identify_nafis")
+    g.add_edge("identify_nafis", "generate_report")
+    g.add_edge("generate_report", "log_done")
+    g.add_edge("log_done", END)
 
-    async def _load_headcount_data(self, db: Any, company_id: str) -> dict:
-        from sqlalchemy import text
-        result = await db.execute(text("""
-            SELECT
-                COUNT(*) as total,
-                COUNT(*) FILTER (WHERE u.is_emirati = true) as emiratis,
-                COUNT(*) FILTER (WHERE u.nafis_enrolled = true) as nafis
-            FROM employees e
-            LEFT JOIN employees_uae_profile u ON u.employee_id = e.id::text
-            WHERE u.company_id = :company_id
-            AND e.is_active = true
-        """), {"company_id": company_id})
-        row = result.fetchone()
-        return {
-            "total": row.total or 0,
-            "emiratis": row.emiratis or 0,
-            "nafis": row.nafis or 0,
-        }
+    _emiratisation_graph = g.compile()
+    return _emiratisation_graph
 
-    async def _save_record(self, db: Any, stats: EmiratiStats) -> None:
-        from sqlalchemy import text
-        await db.execute(text("""
-            INSERT INTO emiratisation_records (
-                company_id, record_month, record_year, total_headcount,
-                emirati_count, emiratisation_percentage, required_percentage,
-                compliance_gap, is_compliant, fine_risk_amount_aed, nafis_employees_count
-            ) VALUES (
-                :co_id, :month, :year, :total, :emiratis, :pct,
-                :req_pct, :gap, :compliant, :fine, :nafis
-            )
-            ON CONFLICT (company_id, record_month, record_year) DO UPDATE
-            SET total_headcount = :total, emirati_count = :emiratis,
-                emiratisation_percentage = :pct, compliance_gap = :gap,
-                is_compliant = :compliant, fine_risk_amount_aed = :fine
-        """), {
-            "co_id": stats.company_id, "month": stats.record_month, "year": stats.record_year,
-            "total": stats.total_headcount, "emiratis": stats.emirati_count,
-            "pct": str(stats.emiratisation_percentage), "req_pct": str(stats.required_percentage),
-            "gap": stats.compliance_gap, "compliant": stats.is_compliant,
-            "fine": str(stats.annual_fine_risk_aed), "nafis": stats.nafis_employees_count,
-        })
-        await db.commit()
 
-    async def _log_to_redis(self, stats: EmiratiStats) -> None:
+async def run_agent(
+    company_id: str,
+    employee_id: Optional[str] = None,
+    payload: dict | None = None,
+    api_mode: str = "mock",
+) -> dict:
+    p = payload or {}
+    initial: dict = {
+        "company_id": company_id,
+        "total_employees": int(p.get("total_employees", 0)),
+        "emirati_employees": int(p.get("emirati_employees", 0)),
+        "sector": p.get("sector", "general"),
+        "year": int(p.get("year", date.today().year)),
+        "current_pct": 0.0,
+        "required_pct": 0.0,
+        "required_emiratis": 0,
+        "shortfall": 0,
+        "monthly_fine_aed": "0.00",
+        "annual_fine_aed": "0.00",
+        "compliant": True,
+        "nafis_eligible_roles": [],
+        "alert_sent": False,
+        "report": {},
+        "ai_recommendation": "",
+        "api_mode": api_mode,
+    }
+
+    graph = create_emiratisation_graph()
+    if graph:
         try:
-            from app.core.redis import get_redis
-            redis = get_redis()
-            await redis.set(
-                f"uae:emiratisation:{stats.company_id}:{stats.record_year}:{stats.record_month}",
-                json.dumps(stats.to_dict(), default=str),
-                ex=86400 * 32,
-            )
-            await redis.aclose()
+            final = await graph.ainvoke(initial)
+            return {
+                **final.get("report", {}),
+                "ai_recommendation": final.get("ai_recommendation", ""),
+            }
         except Exception as exc:
-            logger.warning("emiratisation.redis_failed", error=str(exc))
+            logger.exception("emiratisation_agent.error", error=str(exc))
 
-
-# ─── Singleton ─────────────────────────────────────────────────────────────────
-
-_emiratisation_agent: EmiratiisationAgent | None = None
-
-
-def get_emiratisation_agent() -> EmiratiisationAgent:
-    global _emiratisation_agent
-    if _emiratisation_agent is None:
-        _emiratisation_agent = EmiratiisationAgent()
-    return _emiratisation_agent
+    return {"company_id": company_id, "error": "LangGraph unavailable", "api_mode": api_mode}

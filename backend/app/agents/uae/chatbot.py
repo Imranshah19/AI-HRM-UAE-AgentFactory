@@ -1,324 +1,259 @@
 """
-HR Chatbot UAE Agent — Multilingual HR assistant.
+HR Chatbot UAE Agent — LangGraph StateGraph for multilingual HR assistant.
 
-Languages: English, Arabic (RTL), Urdu, Hindi, Filipino/Tagalog
-Auto-detects language from message content.
+Languages: English (EN), Arabic (AR), Urdu (UR), Hindi (HI), Tagalog (TL).
+Intents: leave_query, payslip_query, policy_query, attendance_query,
+         grievance, general_hr.
 
-Employee queries: leave balance, salary, gratuity, documents, holidays
-HR queries: headcount, compliance, payroll, WPS, Emiratisation
+Nodes:
+  detect_language → parse_intent → fetch_data → generate_response → send_response
 
-Uses Claude API for NLU. Rule-based fallback if no API key.
-Maintains conversation history (last 10 messages per session).
+Claude (claude-opus-4-7) powers language detection and response generation
+with UAE Labour Law knowledge and adaptive thinking.
 """
 
 from __future__ import annotations
 
-import json
 import re
-from dataclasses import dataclass, field
 from datetime import date
-from typing import Any
+from typing import Optional
 
 import structlog
 
-from app.agents.uae.openclaw import get_openclaw
-
 logger = structlog.get_logger(__name__)
 
-LANGUAGE_PATTERNS = {
-    "ar": re.compile(r"[؀-ۿݐ-ݿ]"),
-    "ur": re.compile(r"[؀-ۿ]{3,}"),
-    "hi": re.compile(r"[ऀ-ॿ]"),
-    "tl": re.compile(r"\b(ako|ikaw|siya|kami|kayo|sila|magkano|kailan|nasaan)\b", re.I),
+try:
+    from langgraph.graph import StateGraph, START, END
+    from typing_extensions import TypedDict
+    LANGGRAPH_AVAILABLE = True
+except ImportError:
+    LANGGRAPH_AVAILABLE = False
+
+from app.agents.uae.graph import claude_invoke, is_live_mode
+
+SUPPORTED_LANGUAGES = {"en", "ar", "ur", "hi", "tl"}
+SUPPORTED_INTENTS = {
+    "leave_query", "payslip_query", "policy_query",
+    "attendance_query", "grievance", "general_hr",
 }
 
-KEYWORD_RESPONSES = {
-    "leave balance": lambda ctx: ctx.get("leave_balance_response", "Please check your leave balance in the portal."),
-    "gratuity": lambda ctx: ctx.get("gratuity_response", "Your gratuity is calculated based on your basic salary and years of service per UAE law."),
-    "salary": lambda ctx: ctx.get("salary_response", "Please contact HR for your salary details."),
-    "visa": lambda ctx: ctx.get("visa_response", "Check your visa expiry in the Documents section."),
-    "holiday": lambda ctx: ctx.get("holiday_response", "UAE public holidays include Eid Al Fitr, Eid Al Adha, National Day, and others."),
-    "notice period": lambda ctx: ctx.get("notice_response", "UAE notice periods: <6 months = 14 days, 6m-5yr = 30 days, 5yr+ = 90 days."),
-}
-
-MULTILINGUAL_GREETINGS = {
+LANGUAGE_GREETINGS = {
     "en": "Hello! I'm your UAE HR Assistant. How can I help you today?",
-    "ar": "مرحباً! أنا مساعد الموارد البشرية في الإمارات. كيف يمكنني مساعدتك اليوم؟",
-    "ur": "سلام! میں آپ کا UAE HR اسسٹنٹ ہوں۔ آج میں آپ کی کیسے مدد کر سکتا ہوں؟",
-    "hi": "नमस्ते! मैं आपका UAE HR असिस्टेंट हूँ। आज मैं आपकी कैसे मदद कर सकता हूँ?",
-    "tl": "Kumusta! Ako ang iyong UAE HR Assistant. Paano kita matutulungan ngayon?",
+    "ar": "مرحباً! أنا مساعد الموارد البشرية الإماراتي. كيف يمكنني مساعدتك اليوم؟",
+    "ur": "ہیلو! میں آپ کا UAE HR اسسٹنٹ ہوں۔ آج میں آپ کی کیسے مدد کر سکتا ہوں؟",
+    "hi": "नमस्ते! मैं आपका UAE HR सहायक हूं। आज मैं आपकी कैसे मदद कर सकता हूं?",
+    "tl": "Kumusta! Ako ang inyong UAE HR Assistant. Paano kita matutulungan ngayon?",
 }
 
-SYSTEM_PROMPT = """You are a helpful UAE HR assistant supporting employees and HR managers.
-You answer in the same language as the question.
-You have knowledge of:
-- UAE Labour Law (Federal Decree-Law No. 33/2021)
-- Leave types and balances
-- Payroll and salary calculations in AED
-- Gratuity calculations
-- Document expiry tracking
-- Visa and Emirates ID requirements
-- WPS (Wage Protection System)
-- Emiratisation requirements
-- UAE public holidays (including Eid dates)
-- Ramadan working hours
+MOCK_RESPONSES: dict[str, dict[str, str]] = {
+    "leave_query": {
+        "en": "Under UAE Federal Decree-Law No. 33/2021, you are entitled to 30 days annual leave per year. During Ramadan, working hours are reduced to 6 hours/day.",
+        "ar": "بموجب قانون العمل الإماراتي رقم 33/2021، يحق لك 30 يوم إجازة سنوية. خلال رمضان، تُخفَّض ساعات العمل إلى 6 ساعات يومياً.",
+        "ur": "UAE قانون نمبر 33/2021 کے تحت، آپ سالانہ 30 دن کی چھٹی کے حقدار ہیں۔ رمضان میں کام کے اوقات 6 گھنٹے فی دن کر دیے جاتے ہیں۔",
+        "hi": "UAE फेडरल कानून 33/2021 के तहत, आप सालाना 30 दिन की छुट्टी के हकदार हैं। रमजान के दौरान काम के घंटे 6 घंटे/दिन हो जाते हैं।",
+        "tl": "Sa ilalim ng UAE Federal Decree-Law No. 33/2021, may karapatan kang 30 araw na taunang bakasyon. Sa Ramadan, nabawasan ang oras ng trabaho sa 6 oras/araw.",
+    },
+    "payslip_query": {
+        "en": "Your payslip is processed via the UAE Wage Protection System (WPS). Salaries are paid by the last working day of each month. Your payslip includes ILOE deduction (AED 5 or AED 10/month).",
+        "ar": "تتم معالجة كشف راتبك من خلال نظام حماية الأجور الإماراتي (WPS). تُدفع الرواتب بحلول آخر يوم عمل من كل شهر.",
+        "ur": "آپ کی تنخواہ UAE ویج پروٹیکشن سسٹم (WPS) کے ذریعے پروسیس کی جاتی ہے۔ تنخواہیں ہر ماہ کے آخری کام کے دن تک ادا کی جاتی ہیں۔",
+        "hi": "आपका वेतन UAE वेज प्रोटेक्शन सिस्टम (WPS) के माध्यम से संसाधित होता है। वेतन हर महीने के अंतिम कार्य दिवस तक भुगतान किया जाता है।",
+        "tl": "Ang iyong payslip ay pinoproseso sa pamamagitan ng UAE Wage Protection System (WPS). Ang mga suweldo ay binabayaran sa huling araw ng trabaho ng bawat buwan.",
+    },
+    "general_hr": {
+        "en": "I can help you with leave applications, payslip queries, company policies, attendance, and UAE labour law. What would you like to know?",
+        "ar": "يمكنني مساعدتك في طلبات الإجازة، واستفسارات كشف الراتب، وسياسات الشركة، والحضور، وقانون العمل الإماراتي.",
+        "ur": "میں آپ کی چھٹی کی درخواستوں، تنخواہ کی معلومات، کمپنی کی پالیسیوں اور UAE لیبر قانون میں مدد کر سکتا ہوں۔",
+        "hi": "मैं आपको अवकाश आवेदन, वेतन पर्ची की जानकारी, कंपनी नीतियों और UAE श्रम कानून में सहायता कर सकता हूं।",
+        "tl": "Matutulungan kita sa mga aplikasyon ng bakasyon, mga katanungan sa payslip, mga patakaran ng kumpanya, at batas sa paggawa ng UAE.",
+    },
+}
 
-Always respond in the same language as the user's question.
-For Arabic questions, respond in Arabic (RTL).
-For Urdu questions, respond in Urdu.
-Be friendly, professional, and concise.
-If you need specific employee data, acknowledge you're checking the system."""
-
-
-@dataclass
-class ChatMessage:
-    role: str  # "user" | "assistant"
-    content: str
-    language: str = "en"
-    timestamp: str = ""
-
-    def __post_init__(self):
-        if not self.timestamp:
-            self.timestamp = date.today().isoformat()
-
-
-@dataclass
-class ChatResponse:
-    message: str
-    language: str
-    is_rtl: bool
-    session_id: str
-    data_fetched: dict = field(default_factory=dict)
-    suggestions: list[str] = field(default_factory=list)
-    api_mode: str = "live"
-
-    def to_dict(self) -> dict:
-        return self.__dict__
+if LANGGRAPH_AVAILABLE:
+    class ChatbotState(TypedDict):
+        company_id: str
+        employee_id: str
+        message: str
+        language: str
+        intent: str
+        context_data: dict
+        response: str
+        session_id: str
+        api_mode: str
 
 
-class HRChatbotAgent:
-    """
-    Multilingual UAE HR chatbot. Auto-detects language.
-    Pulls live DB data for specific employee queries.
-    """
+def _detect_language(state: dict) -> dict:
+    message = state.get("message", "").strip()
 
-    HISTORY_MAXLEN = 10
-    SESSION_TTL = 3600  # 1 hour
+    # Simple heuristic detection — Claude handles complex cases in live mode
+    if re.search(r'[؀-ۿ]', message):
+        lang = "ar" if re.search(r'[ء-ي]', message) else "ur"
+    elif re.search(r'[ऀ-ॿ]', message):
+        lang = "hi"
+    elif any(w in message.lower() for w in ["ako", "ikaw", "sila", "naman", "po", "opo", "mga"]):
+        lang = "tl"
+    else:
+        lang = "en"
 
-    def __init__(self):
-        self.claw = get_openclaw()
+    return {"language": lang}
 
-    async def answer(
-        self,
-        message: str,
-        session_id: str,
-        employee_id: str | None = None,
-        company_id: str | None = None,
-        user_role: str = "employee",  # "employee" | "hr_manager" | "group_admin"
-        db=None,
-    ) -> ChatResponse:
-        language = self._detect_language(message)
-        is_rtl = language in ("ar", "ur")
 
-        logger.info(
-            "chatbot_uae.query",
-            language=language,
-            role=user_role,
-            session_id=session_id,
-        )
+def _parse_intent(state: dict) -> dict:
+    message = state.get("message", "").lower()
 
-        history = await self._load_history(session_id)
+    if any(w in message for w in ["leave", "vacation", "إجازة", "چھٹی", "छुट्टी", "bakasyon", "annual"]):
+        intent = "leave_query"
+    elif any(w in message for w in ["salary", "payslip", "راتب", "تنخواہ", "वेतन", "suweldo", "wps", "pay"]):
+        intent = "payslip_query"
+    elif any(w in message for w in ["attendance", "check-in", "checkout", "حضور", "حاضری", "उपस्थिति"]):
+        intent = "attendance_query"
+    elif any(w in message for w in ["policy", "rule", "قانون", "پالیسی", "नीति", "patakaran"]):
+        intent = "policy_query"
+    elif any(w in message for w in ["complaint", "grievance", "شكوى", "شکایت", "शिकायत", "reklamo"]):
+        intent = "grievance"
+    else:
+        intent = "general_hr"
 
-        context_data = {}
-        if employee_id and db:
-            context_data = await self._fetch_employee_context(db, employee_id, company_id)
+    return {"intent": intent}
 
-        if self.claw.is_live:
-            response_text = await self._claude_response(
-                message, history, language, context_data, user_role
-            )
-            api_mode = "live"
-        else:
-            response_text = self._rule_based_response(message, language, context_data, user_role)
-            api_mode = "mock"
 
-        suggestions = self._get_suggestions(language, user_role)
+def _fetch_data(state: dict) -> dict:
+    intent = state.get("intent", "general_hr")
+    employee_id = state.get("employee_id", "")
+    context: dict = {"intent": intent, "employee_id": employee_id, "date": date.today().isoformat()}
 
-        history.append({"role": "user", "content": message})
-        history.append({"role": "assistant", "content": response_text})
-        await self._save_history(session_id, history[-self.HISTORY_MAXLEN * 2:])
-
-        return ChatResponse(
-            message=response_text,
-            language=language,
-            is_rtl=is_rtl,
-            session_id=session_id,
-            data_fetched=context_data,
-            suggestions=suggestions,
-            api_mode=api_mode,
-        )
-
-    def _detect_language(self, text: str) -> str:
-        if LANGUAGE_PATTERNS["hi"].search(text):
-            return "hi"
-        if LANGUAGE_PATTERNS["tl"].search(text):
-            return "tl"
-        arabic_chars = len(LANGUAGE_PATTERNS["ar"].findall(text))
-        if arabic_chars > 2:
-            return "ar"
-        return "en"
-
-    async def _claude_response(
-        self,
-        message: str,
-        history: list[dict],
-        language: str,
-        context: dict,
-        user_role: str,
-    ) -> str:
-        context_str = ""
-        if context:
-            context_str = f"\n\nEmployee context from database:\n{json.dumps(context, default=str, indent=2)}"
-
-        messages = []
-        for h in history[-self.HISTORY_MAXLEN * 2:]:
-            messages.append(h)
-        messages.append({
-            "role": "user",
-            "content": f"{message}{context_str}",
-        })
-
-        response = await self.claw.think(
-            messages=messages,
-            system=SYSTEM_PROMPT + f"\n\nUser role: {user_role}. Respond in language code: {language}.",
-            language=language,
-        )
-        return response.content
-
-    def _rule_based_response(
-        self,
-        message: str,
-        language: str,
-        context: dict,
-        user_role: str,
-    ) -> str:
-        msg_lower = message.lower()
-
-        for keyword, response_fn in KEYWORD_RESPONSES.items():
-            if keyword in msg_lower:
-                response = response_fn(context)
-                if language == "ar":
-                    return f"[Mock - AR] {response}"
-                return f"[Mock] {response}"
-
-        if "leave" in msg_lower or "إجازة" in msg_lower or "چھٹی" in msg_lower:
-            balance = context.get("annual_leave_balance", 25)
-            if language == "ar":
-                return f"رصيد إجازتك السنوية: {balance} يوماً"
-            elif language == "ur":
-                return f"آپ کی سالانہ چھٹیوں کا بیلنس: {balance} دن"
-            return f"Your annual leave balance is {balance} days."
-
-        if "salary" in msg_lower or "راتب" in msg_lower or "تنخواہ" in msg_lower:
-            salary = context.get("basic_salary", "N/A")
-            if language == "ar":
-                return f"راتبك الأساسي: {salary} درهم"
-            return f"Your basic salary is AED {salary}."
-
-        if "gratuity" in msg_lower or "مكافأة" in msg_lower:
-            gratuity = context.get("gratuity_amount", 0)
-            if language == "ar":
-                return f"مكافأتك التقديرية الحالية: {gratuity} درهم"
-            return f"Your current gratuity amount: AED {gratuity:,.2f}"
-
-        if "visa" in msg_lower or "تأشيرة" in msg_lower:
-            expiry = context.get("visa_expiry", "Check portal")
-            if language == "ar":
-                return f"تنتهي تأشيرتك في: {expiry}"
-            return f"Your visa expires on: {expiry}"
-
-        if language == "ar":
-            return "شكراً لسؤالك. يرجى التواصل مع قسم الموارد البشرية للمزيد من المساعدة. [وضع تجريبي]"
-        elif language == "ur":
-            return "آپ کے سوال کا شکریہ۔ مزید مدد کے لیے HR سے رابطہ کریں۔ [Mock موڈ]"
-        return f"[Mock — no ANTHROPIC_API_KEY] I received your query about '{message[:50]}'. Please set ANTHROPIC_API_KEY for live AI responses, or contact HR directly."
-
-    def _get_suggestions(self, language: str, user_role: str) -> list[str]:
-        if language == "ar":
-            if user_role == "employee":
-                return ["كم رصيد إجازتي؟", "ما هو راتبي هذا الشهر؟", "متى تنتهي تأشيرتي؟"]
-            return ["كم عدد الموظفين في إجازة اليوم؟", "ما هو وضع WPS؟", "ما هو رصيد التأمين المنتهي؟"]
-
-        if user_role == "employee":
-            return [
-                "What is my annual leave balance?",
-                "What is my current gratuity amount?",
-                "When does my visa expire?",
-                "What is my salary this month?",
-            ]
-        return [
-            "How many employees are on leave today?",
-            "Show employees with expiring visas",
-            "What is the WPS submission status?",
-            "Show Emiratisation compliance",
-        ]
-
-    async def _fetch_employee_context(self, db: Any, employee_id: str, company_id: str | None) -> dict:
-        try:
-            from sqlalchemy import text
-            result = await db.execute(text("""
-                SELECT s.basic_salary, u.visa_expiry, u.emirates_id_expiry,
-                       u.contract_end, u.insurance_expiry
-                FROM employees_uae_profile u
-                LEFT JOIN salary_structure_uae s ON s.employee_id = u.employee_id
-                WHERE u.employee_id = :emp_id
-            """), {"emp_id": employee_id})
-            row = result.fetchone()
-            if row:
-                return dict(row._mapping)
-        except Exception:
-            pass
-        return {
-            "basic_salary": 8000,
-            "visa_expiry": "2027-03-15",
-            "emirates_id_expiry": "2027-03-15",
-            "annual_leave_balance": 22,
-            "gratuity_amount": 25333.33,
+    if intent == "leave_query":
+        context["leave_balance"] = {"annual": 25, "sick": 10, "used": 5}
+    elif intent == "payslip_query":
+        context["last_payslip"] = {
+            "month": date.today().month,
+            "year": date.today().year,
+            "status": "processed",
+        }
+    elif intent == "attendance_query":
+        context["attendance_summary"] = {
+            "this_month_present": 18,
+            "late_count": 1,
+            "absent_count": 0,
         }
 
-    async def _load_history(self, session_id: str) -> list[dict]:
+    return {"context_data": context}
+
+
+def _generate_response(state: dict) -> dict:
+    lang = state.get("language", "en")
+    intent = state.get("intent", "general_hr")
+    message = state.get("message", "")
+
+    if is_live_mode():
+        system_prompt = (
+            f"You are a multilingual UAE HR assistant. "
+            f"Respond ONLY in language code '{lang}' (en=English, ar=Arabic, ur=Urdu, hi=Hindi, tl=Tagalog). "
+            "You know UAE Federal Decree-Law No. 33/2021, WPS, ILOE, Emiratisation, and Ramadan rules. "
+            f"Context: {state.get('context_data', {})}. "
+            "Keep response under 150 words. Be friendly and accurate."
+        )
+        response = claude_invoke(
+            system=system_prompt,
+            user_message=message,
+            max_tokens=256,
+        )
+    else:
+        # Mock: return intent-specific response in detected language
+        intent_responses = MOCK_RESPONSES.get(intent, MOCK_RESPONSES["general_hr"])
+        response = intent_responses.get(lang, intent_responses["en"])
+
+    return {"response": response}
+
+
+def _send_response(state: dict) -> dict:
+    logger.info(
+        "chatbot.response_sent",
+        employee_id=state.get("employee_id"),
+        language=state.get("language"),
+        intent=state.get("intent"),
+        session_id=state.get("session_id"),
+    )
+    return {}
+
+
+_chatbot_graph = None
+
+
+def create_chatbot_graph():
+    global _chatbot_graph
+    if _chatbot_graph is not None or not LANGGRAPH_AVAILABLE:
+        return _chatbot_graph
+
+    g: StateGraph = StateGraph(ChatbotState)
+    for name, fn in [
+        ("detect_language", _detect_language),
+        ("parse_intent", _parse_intent),
+        ("fetch_data", _fetch_data),
+        ("generate_response", _generate_response),
+        ("send_response", _send_response),
+    ]:
+        g.add_node(name, fn)
+
+    g.add_edge(START, "detect_language")
+    g.add_edge("detect_language", "parse_intent")
+    g.add_edge("parse_intent", "fetch_data")
+    g.add_edge("fetch_data", "generate_response")
+    g.add_edge("generate_response", "send_response")
+    g.add_edge("send_response", END)
+
+    _chatbot_graph = g.compile()
+    return _chatbot_graph
+
+
+async def run_agent(
+    company_id: str,
+    employee_id: Optional[str] = None,
+    payload: dict | None = None,
+    api_mode: str = "mock",
+) -> dict:
+    p = payload or {}
+    import uuid
+    initial: dict = {
+        "company_id": company_id,
+        "employee_id": employee_id or p.get("employee_id", ""),
+        "message": p.get("message", "Hello"),
+        "language": p.get("language", ""),
+        "intent": "",
+        "context_data": {},
+        "response": "",
+        "session_id": p.get("session_id", str(uuid.uuid4())),
+        "api_mode": api_mode,
+    }
+
+    graph = create_chatbot_graph()
+    if graph:
         try:
-            from app.core.redis import get_redis
-            redis = get_redis()
-            raw = await redis.get(f"uae:chat:history:{session_id}")
-            await redis.aclose()
-            if raw:
-                return json.loads(raw)
-        except Exception:
-            pass
-        return []
+            final = await graph.ainvoke(initial)
+            return {
+                "employee_id": final.get("employee_id"),
+                "company_id": company_id,
+                "language": final.get("language"),
+                "intent": final.get("intent"),
+                "response": final.get("response"),
+                "session_id": final.get("session_id"),
+                "api_mode": api_mode,
+            }
+        except Exception as exc:
+            logger.exception("chatbot_agent.error", error=str(exc))
 
-    async def _save_history(self, session_id: str, history: list[dict]) -> None:
-        try:
-            from app.core.redis import get_redis
-            redis = get_redis()
-            await redis.set(
-                f"uae:chat:history:{session_id}",
-                json.dumps(history, default=str),
-                ex=self.SESSION_TTL,
-            )
-            await redis.aclose()
-        except Exception:
-            pass
+    return {
+        "employee_id": initial["employee_id"],
+        "company_id": company_id,
+        "response": LANGUAGE_GREETINGS.get("en"),
+        "language": "en",
+        "api_mode": api_mode,
+    }
 
 
-# ─── Singleton ─────────────────────────────────────────────────────────────────
-
-_hr_chatbot_agent: HRChatbotAgent | None = None
-
-
-def get_hr_chatbot_agent() -> HRChatbotAgent:
-    global _hr_chatbot_agent
-    if _hr_chatbot_agent is None:
-        _hr_chatbot_agent = HRChatbotAgent()
-    return _hr_chatbot_agent
+async def get_supported_languages() -> dict:
+    return {
+        "languages": list(SUPPORTED_LANGUAGES),
+        "intents": list(SUPPORTED_INTENTS),
+        "greetings": LANGUAGE_GREETINGS,
+    }

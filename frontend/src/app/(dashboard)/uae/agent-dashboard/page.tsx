@@ -5,21 +5,19 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const AGENTS = [
-  { key: "openclaw_uae",        en: "OpenClaw UAE",      ar: "أوبن كلو الإمارات",  domain: "core",         description: "Main Claude AI Brain — UAE Labour Law expert" },
-  { key: "paperclip_uae",       en: "Paperclip UAE",     ar: "ورقة مشبك الإمارات", domain: "core",         description: "Agent Orchestrator — Routes to 13 specialists" },
-  { key: "onboarding",          en: "Onboarding",        ar: "التأهيل",             domain: "onboarding",   description: "New employee onboarding — visa, WPS, docs, welcome" },
-  { key: "documents",           en: "Document Tracker",  ar: "تتبع الوثائق",       domain: "documents",    description: "Passport, visa, Emirates ID expiry alerts" },
-  { key: "payroll",             en: "Payroll UAE",       ar: "الرواتب الإماراتية", domain: "payroll",      description: "AED payroll + ILOE + Ramadan hours" },
-  { key: "wps",                 en: "WPS Agent",         ar: "وكيل WPS",           domain: "wps",          description: "SIF file generator + compliance validation" },
-  { key: "gratuity",            en: "Gratuity",          ar: "المكافأة",            domain: "gratuity",     description: "Federal Decree-Law 33/2021 gratuity calculator" },
-  { key: "leave",               en: "Leave UAE",         ar: "إجازات الإمارات",    domain: "leave",        description: "9 UAE leave types + public holidays + Ramadan" },
-  { key: "attendance",          en: "Attendance UAE",    ar: "حضور الإمارات",      domain: "attendance",   description: "Check-in/out, Ramadan 6hr mode, anomaly detect" },
-  { key: "contracts",           en: "Contracts",         ar: "العقود",             domain: "contracts",    description: "Fixed-term contract expiry + notice periods" },
-  { key: "insurance",           en: "Insurance",         ar: "التأمين",            domain: "insurance",    description: "Medical insurance + ILOE compliance" },
-  { key: "air_ticket",          en: "Air Ticket",        ar: "تذاكر السفر",        domain: "air_ticket",   description: "Annual home country air ticket management" },
-  { key: "emiratisation",       en: "Emiratisation",     ar: "التوطين",            domain: "emiratisation","description": "Monthly quota tracking + fine risk calculation" },
-  { key: "offboarding",         en: "Offboarding",       ar: "إنهاء الخدمة",       domain: "offboarding",  description: "Exit + final settlement + 14-day payment law" },
-  { key: "chatbot",             en: "HR Chatbot",        ar: "الدردشة",            domain: "chatbot",      description: "Multilingual: EN/AR/UR/HI/TL — 5 languages" },
+  { key: "leave",          en: "Leave",           ar: "الإجازات",           domain: "leave",          description: "9 UAE leave types — Federal Decree-Law 33/2021" },
+  { key: "payroll",        en: "Payroll",         ar: "الرواتب",            domain: "payroll",        description: "AED payroll + ILOE deduction + Ramadan hours" },
+  { key: "attendance",     en: "Attendance",      ar: "الحضور",             domain: "attendance",     description: "Check-in/out, Ramadan 6hr mode, anomaly detection" },
+  { key: "onboarding",     en: "Onboarding",      ar: "التأهيل",            domain: "onboarding",     description: "New employee onboarding — Emirates ID, visa, WPS" },
+  { key: "document",       en: "Documents",       ar: "تتبع الوثائق",      domain: "document",       description: "Passport, visa, Emirates ID expiry alerts (CRITICAL/URGENT)" },
+  { key: "gratuity",       en: "Gratuity",        ar: "المكافأة",           domain: "gratuity",       description: "End-of-service gratuity — 21/30 days/year, 2yr cap" },
+  { key: "wps",            en: "WPS",             ar: "حماية الأجور",       domain: "wps",            description: "MOHRE SIF XML generator + deadline + fine alerts" },
+  { key: "contract",       en: "Contracts",       ar: "العقود",             domain: "contract",       description: "Limited contract expiry + notice period enforcement" },
+  { key: "insurance",      en: "Insurance",       ar: "التأمين",            domain: "insurance",      description: "DHA/HAAD medical insurance + ILOE compliance" },
+  { key: "air_ticket",     en: "Air Ticket",      ar: "تذاكر السفر",       domain: "air_ticket",     description: "Annual home-country air ticket entitlement (after 1yr)" },
+  { key: "emiratisation",  en: "Emiratisation",   ar: "التوطين",            domain: "emiratisation",  description: "Nafis 2% quota + AED 96,000/slot fine risk" },
+  { key: "offboarding",    en: "Offboarding",     ar: "إنهاء الخدمة",      domain: "offboarding",    description: "Exit settlement + 14-day payment law + visa cancel" },
+  { key: "chatbot",        en: "HR Chatbot",      ar: "المساعد الذكي",     domain: "chatbot",        description: "Multilingual: EN / AR / UR / HI / TL — 5 languages" },
 ];
 
 const MOCK_LOGS = [
@@ -57,7 +55,7 @@ export default function UAEAgentDashboardPage() {
             {isAr ? "لوحة تحكم الوكلاء الذكيين — الإمارات" : "UAE AI Agent Dashboard"}
           </h1>
           <p className="text-sm text-gray-500">
-            {isAr ? "15 وكيل ذكي | وضع: تجريبي (لا مفتاح API)" : "15 AI Agents | Mode: Mock (set ANTHROPIC_API_KEY for live)"}
+            {isAr ? "13 وكيل ذكي — LangGraph | وضع: تجريبي (لا مفتاح API)" : "13 LangGraph Agents — claude-opus-4-7 | Mode: Mock (set ANTHROPIC_API_KEY for live)"}
           </p>
         </div>
         <div className="flex gap-2">

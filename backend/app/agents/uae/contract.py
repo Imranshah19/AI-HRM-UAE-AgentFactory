@@ -1,244 +1,209 @@
 """
-Contract Agent UAE — Contract expiry tracking + notice period management.
+Contract Agent UAE — LangGraph StateGraph for contract lifecycle management.
 
-UAE Law (post Feb 2022):
-  - ALL contracts MUST be fixed-term (unlimited abolished)
-  - Maximum duration: 3 years (renewable)
-  - Must be registered with MOHRE
-  - Arabic version is legally binding
+UAE Labour contracts: Limited (fixed-term, max 2yr, renewable) per
+Federal Decree-Law No. 33/2021.
 
-Notice periods:
-  < 6 months: minimum 14 days
-  6 months - 5 years: 30 days
-  5+ years: 90 days
+Nodes:
+  fetch_contracts → calculate_timelines → send_renewal_alerts → generate_report
 
-Alert timeline:
-  90 days → Reminder
-  60 days → Second reminder
-  30 days → Urgent
-  14 days → Critical
-  Expired → Alert + legal risk warning
+Alert tiers: CRITICAL (≤30 days), URGENT (≤60 days), WARNING (≤90 days).
+Claude drafts renewal recommendations for at-risk contracts.
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Any
+from typing import Optional
 
 import structlog
 
-from app.agents.uae.openclaw import get_openclaw
-
 logger = structlog.get_logger(__name__)
 
-NOTICE_PERIOD_RULES = [
-    {"min_months": 0,   "max_months": 6,   "notice_days": 14},
-    {"min_months": 6,   "max_months": 60,  "notice_days": 30},
-    {"min_months": 60,  "max_months": 9999, "notice_days": 90},
-]
+try:
+    from langgraph.graph import StateGraph, START, END
+    from typing_extensions import TypedDict
+    LANGGRAPH_AVAILABLE = True
+except ImportError:
+    LANGGRAPH_AVAILABLE = False
+
+from app.agents.uae.graph import claude_invoke, is_live_mode
+
+if LANGGRAPH_AVAILABLE:
+    class ContractState(TypedDict):
+        company_id: str
+        contracts: list
+        enriched_contracts: list
+        critical_contracts: list
+        urgent_contracts: list
+        warning_contracts: list
+        alerts_sent: bool
+        report: dict
+        api_mode: str
 
 
-@dataclass
-class ContractAlert:
-    employee_id: str
-    company_id: str
-    employee_name: str
-    contract_end_date: str
-    days_until_expiry: int
-    alert_level: str
-    notice_period_days: int
-    notice_deadline: str
-
-    def to_dict(self) -> dict:
-        return self.__dict__
-
-
-@dataclass
-class ContractCheckResult:
-    company_id: str
-    checked_count: int = 0
-    expiring_90_days: list[dict] = field(default_factory=list)
-    expiring_60_days: list[dict] = field(default_factory=list)
-    expiring_30_days: list[dict] = field(default_factory=list)
-    expiring_14_days: list[dict] = field(default_factory=list)
-    already_expired: list[dict] = field(default_factory=list)
-
-    @property
-    def total_alerts(self) -> int:
-        return (len(self.expiring_30_days) + len(self.expiring_14_days) +
-                len(self.already_expired))
-
-    def to_dict(self) -> dict:
-        return {
-            "company_id": self.company_id,
-            "checked_count": self.checked_count,
-            "total_critical_alerts": self.total_alerts,
-            "expiring_90_days": self.expiring_90_days,
-            "expiring_60_days": self.expiring_60_days,
-            "expiring_30_days": self.expiring_30_days,
-            "expiring_14_days": self.expiring_14_days,
-            "already_expired": self.already_expired,
-        }
+def _fetch_contracts(state: dict) -> dict:
+    today = date.today()
+    mock_contracts = [
+        {"employee_id": "emp-001", "name": "Ahmed Al-Rashidi",
+         "contract_type": "limited", "expiry_date": (today + timedelta(days=20)).isoformat(),
+         "notice_period_days": 30, "department": "Engineering"},
+        {"employee_id": "emp-002", "name": "Priya Sharma",
+         "contract_type": "limited", "expiry_date": (today + timedelta(days=55)).isoformat(),
+         "notice_period_days": 30, "department": "Finance"},
+        {"employee_id": "emp-003", "name": "Juan Santos",
+         "contract_type": "unlimited", "expiry_date": None,
+         "notice_period_days": 30, "department": "Operations"},
+    ]
+    return {"contracts": state.get("contracts") or mock_contracts}
 
 
-class ContractAgent:
-    """
-    UAE contract expiry tracker. Enforces fixed-term contract requirements.
-    """
+def _calculate_timelines(state: dict) -> dict:
+    today = date.today()
+    critical, urgent, warning, enriched = [], [], [], []
 
-    def __init__(self):
-        self.claw = get_openclaw()
+    for c in state.get("contracts", []):
+        expiry_str = c.get("expiry_date")
+        if not expiry_str:
+            enriched.append({**c, "days_to_expiry": None, "status": "unlimited"})
+            continue
+        try:
+            expiry = date.fromisoformat(expiry_str)
+            days = (expiry - today).days
+        except ValueError:
+            enriched.append({**c, "days_to_expiry": None, "status": "unknown"})
+            continue
 
-    async def check_contract_expiries(
-        self,
-        company_id: str | None = None,
-        db=None,
-    ) -> ContractCheckResult:
-        result = ContractCheckResult(company_id=company_id or "all")
+        notice = c.get("notice_period_days", 30)
+        action_by = days - notice
 
-        if db:
-            try:
-                contracts = await self._load_contracts(db, company_id)
-            except Exception as exc:
-                logger.warning("contract_agent.db_load_failed", error=str(exc))
-                contracts = self._mock_contracts(company_id)
+        enriched_c = {**c, "days_to_expiry": days, "action_required_by_days": action_by}
+
+        if days <= 0:
+            enriched_c["status"] = "expired"
+            critical.append(enriched_c)
+        elif days <= 30:
+            enriched_c["status"] = "critical"
+            critical.append(enriched_c)
+        elif days <= 60:
+            enriched_c["status"] = "urgent"
+            urgent.append(enriched_c)
+        elif days <= 90:
+            enriched_c["status"] = "warning"
+            warning.append(enriched_c)
         else:
-            contracts = self._mock_contracts(company_id)
+            enriched_c["status"] = "ok"
 
-        today = date.today()
-        result.checked_count = len(contracts)
+        enriched.append(enriched_c)
 
-        for contract in contracts:
-            try:
-                end_date = date.fromisoformat(str(contract["contract_end"]))
-            except (ValueError, TypeError):
-                continue
+    return {
+        "enriched_contracts": enriched,
+        "critical_contracts": critical,
+        "urgent_contracts": urgent,
+        "warning_contracts": warning,
+    }
 
-            days_remaining = (end_date - today).days
-            join_date = date.fromisoformat(str(contract.get("join_date", today.isoformat())))
-            service_months = (today.year - join_date.year) * 12 + (today.month - join_date.month)
-            notice_days = self._get_notice_period(service_months)
-            notice_deadline = (end_date - timedelta(days=notice_days)).isoformat()
 
-            alert = ContractAlert(
-                employee_id=str(contract.get("employee_id", "")),
-                company_id=str(contract.get("company_id", company_id or "")),
-                employee_name=contract.get("name_en", ""),
-                contract_end_date=end_date.isoformat(),
-                days_until_expiry=days_remaining,
-                alert_level="info",
-                notice_period_days=notice_days,
-                notice_deadline=notice_deadline,
-            )
-
-            if days_remaining <= 0:
-                alert.alert_level = "expired"
-                result.already_expired.append(alert.to_dict())
-            elif days_remaining <= 14:
-                alert.alert_level = "critical"
-                result.expiring_14_days.append(alert.to_dict())
-            elif days_remaining <= 30:
-                alert.alert_level = "urgent"
-                result.expiring_30_days.append(alert.to_dict())
-            elif days_remaining <= 60:
-                alert.alert_level = "warning"
-                result.expiring_60_days.append(alert.to_dict())
-            elif days_remaining <= 90:
-                alert.alert_level = "reminder"
-                result.expiring_90_days.append(alert.to_dict())
-
-        logger.info(
-            "contract_agent.check_complete",
-            company_id=company_id,
-            total=result.checked_count,
-            critical=result.total_alerts,
+def _send_renewal_alerts(state: dict) -> dict:
+    for c in state.get("critical_contracts", []):
+        logger.warning(
+            "contract.critical_expiry",
+            employee=c.get("name"),
+            days=c.get("days_to_expiry"),
+            company_id=state.get("company_id"),
         )
-        return result
-
-    async def send_renewal_alerts(self, company_id: str, db=None) -> dict:
-        check = await self.check_contract_expiries(company_id=company_id, db=db)
-        alerts_sent = len(check.expiring_30_days) + len(check.expiring_14_days) + len(check.already_expired)
-        return {
-            "company_id": company_id,
-            "alerts_sent": alerts_sent,
-            "critical_count": len(check.expiring_14_days),
-            "expired_count": len(check.already_expired),
-        }
-
-    async def calculate_notice_period(
-        self,
-        employee_id: str,
-        company_id: str,
-        join_date: str,
-        db=None,
-    ) -> dict:
-        start = date.fromisoformat(join_date)
-        today = date.today()
-        service_months = (today.year - start.year) * 12 + (today.month - start.month)
-        notice_days = self._get_notice_period(service_months)
-
-        return {
-            "employee_id": employee_id,
-            "company_id": company_id,
-            "join_date": join_date,
-            "service_months": service_months,
-            "notice_period_days": notice_days,
-            "legal_basis": "UAE Federal Decree-Law No. 33/2021 Article 43",
-            "note": (
-                f"{'14 days' if notice_days == 14 else '30 days' if notice_days == 30 else '90 days'} "
-                f"notice required for {'< 6 months' if service_months < 6 else '6 months - 5 years' if service_months < 60 else '5+ years'} service"
-            ),
-        }
-
-    def _get_notice_period(self, service_months: int) -> int:
-        for rule in NOTICE_PERIOD_RULES:
-            if rule["min_months"] <= service_months < rule["max_months"]:
-                return rule["notice_days"]
-        return 90
-
-    async def _load_contracts(self, db: Any, company_id: str | None) -> list[dict]:
-        from sqlalchemy import text
-        query = """
-            SELECT u.employee_id, u.company_id, u.contract_end, u.contract_start,
-                   e.first_name || ' ' || e.last_name as name_en,
-                   e.date_of_joining as join_date
-            FROM employees_uae_profile u
-            LEFT JOIN employees e ON e.id = u.employee_id::uuid
-            WHERE u.contract_end <= CURRENT_DATE + INTERVAL '90 days'
-        """
-        params: dict = {}
-        if company_id:
-            query += " AND u.company_id = :company_id"
-            params["company_id"] = company_id
-
-        result = await db.execute(text(query), params)
-        return [dict(row._mapping) for row in result.fetchall()]
-
-    def _mock_contracts(self, company_id: str | None) -> list[dict]:
-        today = date.today()
-        return [
-            {
-                "employee_id": "mock-001", "company_id": company_id or "mock-co",
-                "name_en": "Ahmed Al-Rashidi", "contract_end": (today + timedelta(days=20)).isoformat(),
-                "join_date": (today - timedelta(days=365)).isoformat(),
-            },
-            {
-                "employee_id": "mock-002", "company_id": company_id or "mock-co",
-                "name_en": "Priya Sharma", "contract_end": (today + timedelta(days=85)).isoformat(),
-                "join_date": (today - timedelta(days=730)).isoformat(),
-            },
-        ]
+    for c in state.get("urgent_contracts", []):
+        logger.info(
+            "contract.urgent_expiry",
+            employee=c.get("name"),
+            days=c.get("days_to_expiry"),
+        )
+    return {"alerts_sent": True}
 
 
-# ─── Singleton ─────────────────────────────────────────────────────────────────
+def _generate_report(state: dict) -> dict:
+    critical = state.get("critical_contracts", [])
+    ai_recommendation = ""
 
-_contract_agent: ContractAgent | None = None
+    if is_live_mode() and critical:
+        prompt = (
+            f"UAE labour contracts expiring critically for company {state.get('company_id')}: "
+            f"{[{'name': c['name'], 'days': c.get('days_to_expiry'), 'dept': c.get('department')} for c in critical]}. "
+            "Recommend: renew, terminate, or convert to unlimited. Include MOHRE notice requirements."
+        )
+        ai_recommendation = claude_invoke(
+            system="You are a UAE Federal Decree-Law No. 33/2021 labour contract specialist.",
+            user_message=prompt,
+            max_tokens=512,
+        )
+
+    report = {
+        "date": date.today().isoformat(),
+        "company_id": state.get("company_id"),
+        "total_contracts": len(state.get("enriched_contracts", [])),
+        "critical_count": len(state.get("critical_contracts", [])),
+        "urgent_count": len(state.get("urgent_contracts", [])),
+        "warning_count": len(state.get("warning_contracts", [])),
+        "critical_contracts": critical,
+        "urgent_contracts": state.get("urgent_contracts", []),
+        "ai_recommendation": ai_recommendation,
+        "api_mode": state.get("api_mode"),
+    }
+    return {"report": report}
 
 
-def get_contract_agent() -> ContractAgent:
-    global _contract_agent
-    if _contract_agent is None:
-        _contract_agent = ContractAgent()
-    return _contract_agent
+_contract_graph = None
+
+
+def create_contract_graph():
+    global _contract_graph
+    if _contract_graph is not None or not LANGGRAPH_AVAILABLE:
+        return _contract_graph
+
+    g: StateGraph = StateGraph(ContractState)
+    for name, fn in [
+        ("fetch_contracts", _fetch_contracts),
+        ("calculate_timelines", _calculate_timelines),
+        ("send_renewal_alerts", _send_renewal_alerts),
+        ("generate_report", _generate_report),
+    ]:
+        g.add_node(name, fn)
+
+    g.add_edge(START, "fetch_contracts")
+    g.add_edge("fetch_contracts", "calculate_timelines")
+    g.add_edge("calculate_timelines", "send_renewal_alerts")
+    g.add_edge("send_renewal_alerts", "generate_report")
+    g.add_edge("generate_report", END)
+
+    _contract_graph = g.compile()
+    return _contract_graph
+
+
+async def run_agent(
+    company_id: str,
+    employee_id: Optional[str] = None,
+    payload: dict | None = None,
+    api_mode: str = "mock",
+) -> dict:
+    p = payload or {}
+    initial: dict = {
+        "company_id": company_id,
+        "contracts": p.get("contracts", []),
+        "enriched_contracts": [],
+        "critical_contracts": [],
+        "urgent_contracts": [],
+        "warning_contracts": [],
+        "alerts_sent": False,
+        "report": {},
+        "api_mode": api_mode,
+    }
+
+    graph = create_contract_graph()
+    if graph:
+        try:
+            final = await graph.ainvoke(initial)
+            return final.get("report", {"company_id": company_id, "api_mode": api_mode})
+        except Exception as exc:
+            logger.exception("contract_agent.error", error=str(exc))
+
+    return {"company_id": company_id, "error": "LangGraph unavailable", "api_mode": api_mode}

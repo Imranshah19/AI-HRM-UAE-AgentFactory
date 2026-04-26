@@ -1,299 +1,205 @@
 """
-Document Agent UAE — Tracks document expiry and sends tiered alerts.
+Document Agent UAE — LangGraph StateGraph for document expiry tracking.
 
-Trigger: Celery daily 08:00 AM UAE (04:00 UTC)
+Tracks: Emirates ID, Visa, Labour Card, Passport, Medical Fitness,
+        Trade License, Establishment Card, Insurance certificates.
 
-Documents tracked: Passport, Visa, Emirates ID, Labour Card,
-                   Medical Insurance, Driving License, custom docs
+Nodes:
+  fetch_docs → calculate_expiry → categorize_urgency
+  → send_alerts → generate_report
 
-Alert timeline:
-  90 days → Email reminder to HR
-  60 days → Second reminder
-  30 days → Urgent alert HR + employee
-  14 days → Critical
-   7 days → CRITICAL — escalate to management
-   0 days → RED ALERT daily until resolved
+Alert tiers: CRITICAL (≤7 days), URGENT (≤30 days), WARNING (≤90 days).
+Claude generates prioritised action plan for CRITICAL documents.
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Any
+from typing import Optional
 
 import structlog
 
-from app.agents.uae.openclaw import get_openclaw
-
 logger = structlog.get_logger(__name__)
 
-ALERT_THRESHOLDS = [
-    {"days": 90, "level": "reminder",  "label": "90-Day Reminder"},
-    {"days": 60, "level": "reminder",  "label": "60-Day Reminder"},
-    {"days": 30, "level": "urgent",    "label": "30-Day Urgent Alert"},
-    {"days": 14, "level": "critical",  "label": "14-Day Critical Alert"},
-    {"days": 7,  "level": "critical",  "label": "7-Day CRITICAL"},
-    {"days": 0,  "level": "emergency", "label": "EXPIRED — RED ALERT"},
-]
+try:
+    from langgraph.graph import StateGraph, START, END
+    from typing_extensions import TypedDict
+    LANGGRAPH_AVAILABLE = True
+except ImportError:
+    LANGGRAPH_AVAILABLE = False
 
-DOCUMENT_TYPES = [
-    "passport", "visa", "emirates_id", "labour_card",
-    "insurance", "driving_license", "medical_fitness", "other",
-]
+from app.agents.uae.graph import claude_invoke, is_live_mode
 
+ALERT_TIERS = {
+    "critical": 7,
+    "urgent": 30,
+    "warning": 90,
+}
 
-@dataclass
-class DocumentAlert:
-    employee_id: str
-    company_id: str
-    document_type: str
-    document_name: str
-    expiry_date: str
-    days_until_expiry: int
-    alert_level: str
-    alert_label: str
-    employee_name: str = ""
-    employee_email: str = ""
-
-    def to_dict(self) -> dict:
-        return self.__dict__
+if LANGGRAPH_AVAILABLE:
+    class DocumentState(TypedDict):
+        company_id: str
+        employee_id: str
+        documents: list
+        enriched_docs: list
+        critical_docs: list
+        urgent_docs: list
+        warning_docs: list
+        alerts_sent: bool
+        report: dict
+        ai_action_plan: str
+        api_mode: str
 
 
-@dataclass
-class DocumentCheckResult:
-    company_id: str
-    checked_count: int = 0
-    alerts_critical: list[dict] = field(default_factory=list)
-    alerts_urgent: list[dict] = field(default_factory=list)
-    alerts_reminder: list[dict] = field(default_factory=list)
-    alerts_emergency: list[dict] = field(default_factory=list)
-    already_expired: int = 0
-    expiring_7_days: int = 0
-    expiring_30_days: int = 0
-    expiring_90_days: int = 0
-
-    @property
-    def total_alerts(self) -> int:
-        return (len(self.alerts_critical) + len(self.alerts_urgent) +
-                len(self.alerts_reminder) + len(self.alerts_emergency))
-
-    def to_dict(self) -> dict:
-        return {
-            "company_id": self.company_id,
-            "checked_count": self.checked_count,
-            "total_alerts": self.total_alerts,
-            "already_expired": self.already_expired,
-            "expiring_7_days": self.expiring_7_days,
-            "expiring_30_days": self.expiring_30_days,
-            "expiring_90_days": self.expiring_90_days,
-            "alerts_emergency": self.alerts_emergency,
-            "alerts_critical": self.alerts_critical,
-            "alerts_urgent": self.alerts_urgent,
-            "alerts_reminder": self.alerts_reminder,
-        }
+def _fetch_docs(state: dict) -> dict:
+    today = date.today()
+    mock_docs = [
+        {"type": "Emirates ID", "employee_id": "emp-001", "name": "Ahmed Al-Rashidi",
+         "expiry_date": (today + timedelta(days=5)).isoformat()},
+        {"type": "Visa", "employee_id": "emp-002", "name": "Priya Sharma",
+         "expiry_date": (today + timedelta(days=25)).isoformat()},
+        {"type": "Labour Card", "employee_id": "emp-003", "name": "Juan Santos",
+         "expiry_date": (today + timedelta(days=80)).isoformat()},
+        {"type": "Passport", "employee_id": "emp-001", "name": "Ahmed Al-Rashidi",
+         "expiry_date": (today + timedelta(days=200)).isoformat()},
+        {"type": "Trade License", "employee_id": None, "name": "Company",
+         "expiry_date": (today + timedelta(days=3)).isoformat()},
+    ]
+    docs = state.get("documents") or mock_docs
+    return {"documents": docs}
 
 
-class DocumentAgent:
-    """
-    Tracks UAE employee document expiries across all companies.
-    Sends tiered alerts to HR and employees.
-    """
-
-    def __init__(self):
-        self.claw = get_openclaw()
-
-    async def check_all_expiries(
-        self,
-        company_id: str | None = None,
-        db=None,
-    ) -> DocumentCheckResult:
-        result = DocumentCheckResult(company_id=company_id or "all")
-
-        if db:
-            try:
-                docs = await self._load_documents_from_db(db, company_id)
-            except Exception as exc:
-                logger.warning("document_agent_uae.db_load_failed", error=str(exc))
-                docs = self._mock_documents(company_id)
-        else:
-            docs = self._mock_documents(company_id)
-
-        today = date.today()
-        result.checked_count = len(docs)
-
-        for doc in docs:
-            try:
-                expiry = date.fromisoformat(str(doc["expiry_date"]))
-            except (ValueError, TypeError):
-                continue
-
-            days_remaining = (expiry - today).days
-            alert = self._classify_alert(doc, days_remaining)
-
-            if days_remaining <= 0:
-                result.already_expired += 1
-                result.alerts_emergency.append(alert.to_dict())
-            elif days_remaining <= 7:
-                result.expiring_7_days += 1
-                result.alerts_critical.append(alert.to_dict())
-            elif days_remaining <= 14:
-                result.alerts_critical.append(alert.to_dict())
-            elif days_remaining <= 30:
-                result.expiring_30_days += 1
-                result.alerts_urgent.append(alert.to_dict())
-            elif days_remaining <= 90:
-                result.expiring_90_days += 1
-                result.alerts_reminder.append(alert.to_dict())
-
-        await self._log_check(result)
-        logger.info(
-            "document_agent_uae.check_complete",
-            company_id=company_id,
-            total=result.checked_count,
-            alerts=result.total_alerts,
-            expired=result.already_expired,
-        )
-        return result
-
-    async def send_expiry_alerts(
-        self,
-        company_id: str,
-        db=None,
-    ) -> dict:
-        check_result = await self.check_all_expiries(company_id=company_id, db=db)
-        alerts_sent = 0
-
-        for alert in check_result.alerts_emergency + check_result.alerts_critical:
-            logger.warning(
-                "document_agent_uae.alert_sent",
-                level=alert.get("alert_level"),
-                employee_id=alert.get("employee_id"),
-                document=alert.get("document_type"),
-                days=alert.get("days_until_expiry"),
-            )
-            alerts_sent += 1
-
-        return {
-            "company_id": company_id,
-            "alerts_sent": alerts_sent,
-            "summary": check_result.to_dict(),
-        }
-
-    async def generate_expiry_report(
-        self,
-        company_id: str,
-        db=None,
-    ) -> dict:
-        result = await self.check_all_expiries(company_id=company_id, db=db)
-        report = {
-            "report_date": date.today().isoformat(),
-            "company_id": company_id,
-            "summary": result.to_dict(),
-            "requires_immediate_action": result.already_expired + len(result.alerts_critical),
-        }
-
-        if self.claw.is_live:
-            prompt = (
-                f"Summarize this UAE document expiry report for HR: {json.dumps(result.to_dict(), default=str)}. "
-                "Give 3 key action items and risk assessment."
-            )
-            report["ai_summary"] = await self.claw.simple_chat(prompt)
-        else:
-            report["ai_summary"] = (
-                f"[Mock] {result.already_expired} documents expired. "
-                f"{len(result.alerts_critical)} critical (≤14 days). "
-                f"{len(result.alerts_urgent)} urgent (≤30 days). Immediate HR action required."
-            )
-
-        return report
-
-    def _classify_alert(self, doc: dict, days_remaining: int) -> DocumentAlert:
-        level = "reminder"
-        label = "Expiry Reminder"
-
-        for threshold in ALERT_THRESHOLDS:
-            if days_remaining <= threshold["days"]:
-                level = threshold["level"]
-                label = threshold["label"]
-
-        return DocumentAlert(
-            employee_id=str(doc.get("employee_id", "")),
-            company_id=str(doc.get("company_id", "")),
-            document_type=doc.get("document_type", "unknown"),
-            document_name=doc.get("document_name", doc.get("document_type", "Document")),
-            expiry_date=str(doc.get("expiry_date", "")),
-            days_until_expiry=days_remaining,
-            alert_level=level,
-            alert_label=label,
-            employee_name=doc.get("employee_name", ""),
-            employee_email=doc.get("employee_email", ""),
-        )
-
-    async def _load_documents_from_db(self, db: Any, company_id: str | None) -> list[dict]:
-        from sqlalchemy import text
-        query = """
-            SELECT dt.*, e.first_name || ' ' || e.last_name as employee_name
-            FROM documents_tracker dt
-            LEFT JOIN employees e ON e.id = dt.employee_id::uuid
-            WHERE dt.expiry_date <= CURRENT_DATE + INTERVAL '90 days'
-        """
-        params: dict = {}
-        if company_id:
-            query += " AND dt.company_id = :company_id"
-            params["company_id"] = company_id
-
-        result = await db.execute(text(query), params)
-        rows = result.fetchall()
-        return [dict(row._mapping) for row in rows]
-
-    def _mock_documents(self, company_id: str | None) -> list[dict]:
-        today = date.today()
-        return [
-            {
-                "employee_id": "mock-emp-001",
-                "company_id": company_id or "mock-co-001",
-                "document_type": "passport",
-                "document_name": "Passport",
-                "expiry_date": (today + timedelta(days=25)).isoformat(),
-                "employee_name": "Ahmed Al-Rashidi",
-            },
-            {
-                "employee_id": "mock-emp-002",
-                "company_id": company_id or "mock-co-001",
-                "document_type": "visa",
-                "document_name": "UAE Residence Visa",
-                "expiry_date": (today + timedelta(days=5)).isoformat(),
-                "employee_name": "Priya Sharma",
-            },
-            {
-                "employee_id": "mock-emp-003",
-                "company_id": company_id or "mock-co-001",
-                "document_type": "emirates_id",
-                "document_name": "Emirates ID",
-                "expiry_date": (today - timedelta(days=3)).isoformat(),
-                "employee_name": "Juan Santos",
-            },
-        ]
-
-    async def _log_check(self, result: DocumentCheckResult) -> None:
+def _calculate_expiry(state: dict) -> dict:
+    today = date.today()
+    enriched = []
+    for doc in state.get("documents", []):
         try:
-            from app.core.redis import get_redis
-            redis = get_redis()
-            entry = json.dumps(result.to_dict(), default=str)
-            await redis.set(f"uae:documents:last_check:{result.company_id}", entry, ex=86400)
-            await redis.aclose()
+            expiry = date.fromisoformat(doc["expiry_date"])
+            days_left = (expiry - today).days
+        except (KeyError, ValueError):
+            days_left = 999
+        enriched.append({**doc, "days_left": days_left, "expired": days_left < 0})
+    return {"enriched_docs": enriched}
+
+
+def _categorize_urgency(state: dict) -> dict:
+    critical, urgent, warning = [], [], []
+    for doc in state.get("enriched_docs", []):
+        d = doc["days_left"]
+        if doc.get("expired") or d <= ALERT_TIERS["critical"]:
+            critical.append(doc)
+        elif d <= ALERT_TIERS["urgent"]:
+            urgent.append(doc)
+        elif d <= ALERT_TIERS["warning"]:
+            warning.append(doc)
+    return {"critical_docs": critical, "urgent_docs": urgent, "warning_docs": warning}
+
+
+def _send_alerts(state: dict) -> dict:
+    for doc in state.get("critical_docs", []):
+        logger.warning(
+            "document.critical_alert",
+            doc_type=doc["type"],
+            employee=doc.get("name"),
+            days_left=doc["days_left"],
+        )
+    for doc in state.get("urgent_docs", []):
+        logger.info(
+            "document.urgent_alert",
+            doc_type=doc["type"],
+            employee=doc.get("name"),
+            days_left=doc["days_left"],
+        )
+    return {"alerts_sent": True}
+
+
+def _generate_report(state: dict) -> dict:
+    ai_action_plan = ""
+    critical = state.get("critical_docs", [])
+
+    if is_live_mode() and critical:
+        prompt = (
+            f"UAE document compliance — CRITICAL expirations: {critical}. "
+            f"Company: {state.get('company_id')}. "
+            "Create a prioritised action plan with MOHRE/ICP steps and deadlines."
+        )
+        ai_action_plan = claude_invoke(
+            system="You are a UAE PRO (Public Relations Officer) compliance expert.",
+            user_message=prompt,
+            max_tokens=512,
+        )
+
+    report = {
+        "date": date.today().isoformat(),
+        "company_id": state.get("company_id"),
+        "total_documents": len(state.get("enriched_docs", [])),
+        "critical_count": len(state.get("critical_docs", [])),
+        "urgent_count": len(state.get("urgent_docs", [])),
+        "warning_count": len(state.get("warning_docs", [])),
+        "critical_docs": state.get("critical_docs", []),
+        "urgent_docs": state.get("urgent_docs", []),
+        "warning_docs": state.get("warning_docs", []),
+        "api_mode": state.get("api_mode"),
+    }
+    return {"report": report, "ai_action_plan": ai_action_plan}
+
+
+_document_graph = None
+
+
+def create_document_graph():
+    global _document_graph
+    if _document_graph is not None or not LANGGRAPH_AVAILABLE:
+        return _document_graph
+
+    g: StateGraph = StateGraph(DocumentState)
+    for name, fn in [
+        ("fetch_docs", _fetch_docs),
+        ("calculate_expiry", _calculate_expiry),
+        ("categorize_urgency", _categorize_urgency),
+        ("send_alerts", _send_alerts),
+        ("generate_report", _generate_report),
+    ]:
+        g.add_node(name, fn)
+
+    g.add_edge(START, "fetch_docs")
+    g.add_edge("fetch_docs", "calculate_expiry")
+    g.add_edge("calculate_expiry", "categorize_urgency")
+    g.add_edge("categorize_urgency", "send_alerts")
+    g.add_edge("send_alerts", "generate_report")
+    g.add_edge("generate_report", END)
+
+    _document_graph = g.compile()
+    return _document_graph
+
+
+async def run_agent(
+    company_id: str,
+    employee_id: Optional[str] = None,
+    payload: dict | None = None,
+    api_mode: str = "mock",
+) -> dict:
+    p = payload or {}
+    initial: dict = {
+        "company_id": company_id,
+        "employee_id": employee_id or p.get("employee_id", ""),
+        "documents": p.get("documents", []),
+        "enriched_docs": [],
+        "critical_docs": [],
+        "urgent_docs": [],
+        "warning_docs": [],
+        "alerts_sent": False,
+        "report": {},
+        "ai_action_plan": "",
+        "api_mode": api_mode,
+    }
+
+    graph = create_document_graph()
+    if graph:
+        try:
+            final = await graph.ainvoke(initial)
+            return {**final.get("report", {}), "ai_action_plan": final.get("ai_action_plan", "")}
         except Exception as exc:
-            logger.warning("document_agent_uae.redis_failed", error=str(exc))
+            logger.exception("document_agent.error", error=str(exc))
 
-
-# ─── Singleton ─────────────────────────────────────────────────────────────────
-
-_document_agent: DocumentAgent | None = None
-
-
-def get_document_agent() -> DocumentAgent:
-    global _document_agent
-    if _document_agent is None:
-        _document_agent = DocumentAgent()
-    return _document_agent
+    return {"company_id": company_id, "error": "LangGraph unavailable", "api_mode": api_mode}

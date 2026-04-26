@@ -1,249 +1,260 @@
 """
-Air Ticket Agent UAE — Annual home country air ticket entitlement.
+Air Ticket Agent UAE — LangGraph StateGraph for annual home-country air ticket.
 
-Standard UAE company practice (not statutory — company policy):
-  - After 1 year service, eligible for annual air ticket
-  - Fixed AED amount or actual ticket cost (per policy)
-  - Separate from annual leave (can be combined)
-  - Return date tracked for visa compliance
+UAE Practice: Most expatriate contracts include one annual air ticket to home country.
+Entitlement typically after completing 1 year of service.
 
-Manages: request → approval → utilization → reporting
+Nodes:
+  fetch_entitlement → check_eligibility → process_request → calculate_value
+  → send_approval → track_return → generate_report → log_done
+
+Claude validates complex multi-leg / family ticket requests.
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
-from datetime import date, timedelta
-from decimal import Decimal
-from typing import Any
+from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Optional
 
 import structlog
 
-from app.agents.uae.openclaw import get_openclaw
-
 logger = structlog.get_logger(__name__)
 
+try:
+    from langgraph.graph import StateGraph, START, END
+    from typing_extensions import TypedDict
+    LANGGRAPH_AVAILABLE = True
+except ImportError:
+    LANGGRAPH_AVAILABLE = False
 
-@dataclass
-class AirTicketEntitlement:
-    employee_id: str
-    company_id: str
-    is_eligible: bool
-    eligibility_date: str
-    annual_value_aed: Decimal
-    current_year_used: bool
-    last_used_date: str | None
-    status: str  # eligible | not_eligible | used | expired
+from app.agents.uae.graph import claude_invoke, is_live_mode
 
-    def to_dict(self) -> dict:
+# Average ticket value by region (AED)
+REGION_TICKET_VALUE: dict[str, Decimal] = {
+    "south_asia": Decimal("1500"),
+    "southeast_asia": Decimal("2200"),
+    "middle_east": Decimal("800"),
+    "africa": Decimal("2500"),
+    "europe": Decimal("3500"),
+    "north_america": Decimal("5000"),
+    "other": Decimal("2000"),
+}
+
+if LANGGRAPH_AVAILABLE:
+    class AirTicketState(TypedDict):
+        company_id: str
+        employee_id: str
+        employee_name: str
+        nationality: str
+        home_country: str
+        join_date: str
+        ticket_type: str        # "economy" | "business"
+        includes_family: bool
+        family_members: int
+        years_of_service: float
+        eligible: bool
+        eligibility_reason: str
+        ticket_value_aed: str
+        approved: bool
+        return_date: str
+        report: dict
+        api_mode: str
+
+
+def _fetch_entitlement(state: dict) -> dict:
+    try:
+        join = date.fromisoformat(state.get("join_date", "2020-01-01"))
+        years = (date.today() - join).days / 365.25
+    except ValueError:
+        years = 0.0
+    return {"years_of_service": round(years, 2)}
+
+
+def _check_eligibility(state: dict) -> dict:
+    years = state.get("years_of_service", 0)
+    if years < 1:
         return {
-            **self.__dict__,
-            "annual_value_aed": str(self.annual_value_aed),
-            "currency": "AED",
+            "eligible": False,
+            "eligibility_reason": f"Less than 1 year of service ({round(years, 1)} years)",
         }
+    return {
+        "eligible": True,
+        "eligibility_reason": f"Eligible — {round(years, 1)} years of service",
+    }
 
 
-@dataclass
-class TicketRequest:
-    employee_id: str
-    company_id: str
-    destination_country: str
-    departure_date: str
-    return_date: str
-    ticket_value_aed: Decimal
-    cash_in_lieu: bool
-    status: str = "pending"
-    approved_by: str | None = None
-    notes: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            **self.__dict__,
-            "ticket_value_aed": str(self.ticket_value_aed),
-            "currency": "AED",
-        }
+def _process_request(state: dict) -> dict:
+    if not state.get("eligible"):
+        return {}
+    logger.info(
+        "air_ticket.request_processed",
+        employee_id=state.get("employee_id"),
+        home_country=state.get("home_country"),
+    )
+    return {}
 
 
-class AirTicketAgent:
-    """
-    UAE air ticket entitlement management.
-    Tracks eligibility, utilization, and return dates for visa compliance.
-    """
+def _calculate_value(state: dict) -> dict:
+    if not state.get("eligible"):
+        return {"ticket_value_aed": "0.00"}
 
-    def __init__(self):
-        self.claw = get_openclaw()
+    home = (state.get("home_country") or "").lower()
+    region = "other"
+    if any(c in home for c in ["india", "pakistan", "bangladesh", "sri lanka", "nepal"]):
+        region = "south_asia"
+    elif any(c in home for c in ["philippines", "indonesia", "malaysia", "thailand"]):
+        region = "southeast_asia"
+    elif any(c in home for c in ["egypt", "jordan", "lebanon", "syria"]):
+        region = "middle_east"
+    elif any(c in home for c in ["uk", "germany", "france", "italy", "spain"]):
+        region = "europe"
+    elif any(c in home for c in ["usa", "canada", "united states"]):
+        region = "north_america"
 
-    async def check_eligibility(
-        self,
-        employee_id: str,
-        company_id: str,
-        db=None,
-    ) -> AirTicketEntitlement:
-        emp_data = await self._load_employee_data(db, employee_id)
-        join_date_str = emp_data.get("join_date", date.today().isoformat())
-        join_date = date.fromisoformat(join_date_str)
-        today = date.today()
+    base = REGION_TICKET_VALUE.get(region, REGION_TICKET_VALUE["other"])
 
-        service_days = (today - join_date).days
-        eligibility_date = join_date + timedelta(days=365)
-        is_eligible = (
-            service_days >= 365 and
-            emp_data.get("air_ticket_entitlement", False)
+    if state.get("ticket_type") == "business":
+        base = base * Decimal("2.5")
+
+    if state.get("includes_family"):
+        members = max(1, int(state.get("family_members", 1)))
+        base = base * Decimal(str(members))
+
+    return {"ticket_value_aed": str(base.quantize(Decimal("0.01"), ROUND_HALF_UP))}
+
+
+def _send_approval(state: dict) -> dict:
+    if not state.get("eligible"):
+        return {"approved": False}
+    logger.info(
+        "air_ticket.approved",
+        employee_id=state.get("employee_id"),
+        value=state.get("ticket_value_aed"),
+    )
+    return {"approved": True}
+
+
+def _track_return(state: dict) -> dict:
+    logger.info(
+        "air_ticket.return_tracked",
+        employee_id=state.get("employee_id"),
+        return_date=state.get("return_date"),
+    )
+    return {}
+
+
+def _generate_report(state: dict) -> dict:
+    ai_note = ""
+    if is_live_mode() and state.get("includes_family") and int(state.get("family_members", 0)) > 3:
+        prompt = (
+            f"Large family air ticket request: employee {state.get('employee_name')}, "
+            f"{state.get('family_members')} members, value AED {state.get('ticket_value_aed')}. "
+            "Verify entitlement and advise on approval conditions."
+        )
+        ai_note = claude_invoke(
+            system="You are a UAE HR air ticket entitlement specialist.",
+            user_message=prompt,
+            max_tokens=256,
         )
 
-        current_year_used = bool(emp_data.get("air_ticket_last_used_date") and
-            date.fromisoformat(str(emp_data["air_ticket_last_used_date"])).year == today.year)
-
-        if not emp_data.get("air_ticket_entitlement", False):
-            status = "not_eligible"
-        elif not is_eligible:
-            status = "not_eligible"
-        elif current_year_used:
-            status = "used"
-        else:
-            status = "eligible"
-
-        return AirTicketEntitlement(
-            employee_id=employee_id,
-            company_id=company_id,
-            is_eligible=is_eligible and not current_year_used,
-            eligibility_date=eligibility_date.isoformat(),
-            annual_value_aed=Decimal(str(emp_data.get("air_ticket_value_aed", 3000))),
-            current_year_used=current_year_used,
-            last_used_date=str(emp_data.get("air_ticket_last_used_date")) if emp_data.get("air_ticket_last_used_date") else None,
-            status=status,
-        )
-
-    async def process_ticket_request(
-        self,
-        employee_id: str,
-        company_id: str,
-        destination_country: str,
-        departure_date: str,
-        return_date: str,
-        cash_in_lieu: bool = False,
-        db=None,
-    ) -> TicketRequest:
-        eligibility = await self.check_eligibility(employee_id, company_id, db)
-
-        request = TicketRequest(
-            employee_id=employee_id,
-            company_id=company_id,
-            destination_country=destination_country,
-            departure_date=departure_date,
-            return_date=return_date,
-            ticket_value_aed=eligibility.annual_value_aed,
-            cash_in_lieu=cash_in_lieu,
-        )
-
-        if not eligibility.is_eligible:
-            request.status = "rejected"
-            request.notes = f"Not eligible: {eligibility.status}"
-        else:
-            request.status = "pending_approval"
-            request.notes = "Submitted for line manager approval"
-
-        if db and request.status != "rejected":
-            try:
-                await self._save_request(db, request)
-            except Exception as exc:
-                logger.warning("air_ticket.save_failed", error=str(exc))
-
-        logger.info(
-            "air_ticket.request_processed",
-            employee_id=employee_id,
-            status=request.status,
-            value=str(request.ticket_value_aed),
-        )
-        return request
-
-    async def generate_utilization_report(self, company_id: str, db=None) -> dict:
-        employees = await self._load_all_entitlements(db, company_id)
-        used = sum(1 for e in employees if e.get("current_year_used", False))
-        eligible = sum(1 for e in employees if e.get("air_ticket_entitlement", False) and e.get("service_years", 0) >= 1)
-
-        return {
-            "company_id": company_id,
-            "year": date.today().year,
-            "total_eligible": eligible,
-            "used_this_year": used,
-            "unused_count": eligible - used,
-            "utilization_percent": round((used / eligible * 100) if eligible else 0, 1),
-            "total_liability_aed": str(Decimal(str((eligible - used) * 3000))),
-            "currency": "AED",
-        }
-
-    async def _load_employee_data(self, db: Any, employee_id: str) -> dict:
-        if db:
-            try:
-                from sqlalchemy import text
-                result = await db.execute(text("""
-                    SELECT u.air_ticket_entitlement, u.air_ticket_value_aed,
-                           u.air_ticket_last_used_date, e.date_of_joining as join_date
-                    FROM employees_uae_profile u
-                    LEFT JOIN employees e ON e.id = u.employee_id::uuid
-                    WHERE u.employee_id = :emp_id
-                """), {"emp_id": employee_id})
-                row = result.fetchone()
-                if row:
-                    return dict(row._mapping)
-            except Exception:
-                pass
-        return {
-            "air_ticket_entitlement": True,
-            "air_ticket_value_aed": 3000,
-            "air_ticket_last_used_date": None,
-            "join_date": (date.today() - timedelta(days=400)).isoformat(),
-        }
-
-    async def _load_all_entitlements(self, db: Any, company_id: str) -> list[dict]:
-        if db:
-            try:
-                from sqlalchemy import text
-                result = await db.execute(text("""
-                    SELECT u.employee_id, u.air_ticket_entitlement, u.air_ticket_value_aed,
-                           u.air_ticket_last_used_date,
-                           EXTRACT(YEAR FROM AGE(CURRENT_DATE, e.date_of_joining)) as service_years
-                    FROM employees_uae_profile u
-                    LEFT JOIN employees e ON e.id = u.employee_id::uuid
-                    WHERE u.company_id = :company_id
-                """), {"company_id": company_id})
-                return [dict(row._mapping) for row in result.fetchall()]
-            except Exception:
-                pass
-        return [
-            {"air_ticket_entitlement": True, "service_years": 2, "current_year_used": False},
-            {"air_ticket_entitlement": True, "service_years": 3, "current_year_used": True},
-            {"air_ticket_entitlement": False, "service_years": 0.5, "current_year_used": False},
-        ]
-
-    async def _save_request(self, db: Any, request: TicketRequest) -> None:
-        from sqlalchemy import text
-        await db.execute(text("""
-            INSERT INTO agent_logs_uae (
-                company_id, agent_name, task_type, employee_id,
-                input_data, output_data, status, triggered_by
-            ) VALUES (
-                :company_id, 'AirTicketAgent', 'ticket_request', :employee_id,
-                :input, :output, 'success', 'webhook'
-            )
-        """), {
-            "company_id": request.company_id,
-            "employee_id": request.employee_id,
-            "input": json.dumps({"destination": request.destination_country}),
-            "output": json.dumps(request.to_dict()),
-        })
-        await db.commit()
+    report = {
+        "date": date.today().isoformat(),
+        "company_id": state.get("company_id"),
+        "employee_id": state.get("employee_id"),
+        "employee_name": state.get("employee_name"),
+        "eligible": state.get("eligible"),
+        "eligibility_reason": state.get("eligibility_reason"),
+        "ticket_value_aed": state.get("ticket_value_aed"),
+        "approved": state.get("approved"),
+        "ticket_type": state.get("ticket_type"),
+        "includes_family": state.get("includes_family"),
+        "family_members": state.get("family_members"),
+        "ai_notes": ai_note,
+        "currency": "AED",
+        "api_mode": state.get("api_mode"),
+    }
+    return {"report": report}
 
 
-# ─── Singleton ─────────────────────────────────────────────────────────────────
+def _log_done(state: dict) -> dict:
+    logger.info(
+        "air_ticket.completed",
+        employee_id=state.get("employee_id"),
+        approved=state.get("approved"),
+        value=state.get("ticket_value_aed"),
+    )
+    return {}
 
-_air_ticket_agent: AirTicketAgent | None = None
+
+_air_ticket_graph = None
 
 
-def get_air_ticket_agent() -> AirTicketAgent:
-    global _air_ticket_agent
-    if _air_ticket_agent is None:
-        _air_ticket_agent = AirTicketAgent()
-    return _air_ticket_agent
+def create_air_ticket_graph():
+    global _air_ticket_graph
+    if _air_ticket_graph is not None or not LANGGRAPH_AVAILABLE:
+        return _air_ticket_graph
+
+    g: StateGraph = StateGraph(AirTicketState)
+    for name, fn in [
+        ("fetch_entitlement", _fetch_entitlement),
+        ("check_eligibility", _check_eligibility),
+        ("process_request", _process_request),
+        ("calculate_value", _calculate_value),
+        ("send_approval", _send_approval),
+        ("track_return", _track_return),
+        ("generate_report", _generate_report),
+        ("log_done", _log_done),
+    ]:
+        g.add_node(name, fn)
+
+    g.add_edge(START, "fetch_entitlement")
+    g.add_edge("fetch_entitlement", "check_eligibility")
+    g.add_edge("check_eligibility", "process_request")
+    g.add_edge("process_request", "calculate_value")
+    g.add_edge("calculate_value", "send_approval")
+    g.add_edge("send_approval", "track_return")
+    g.add_edge("track_return", "generate_report")
+    g.add_edge("generate_report", "log_done")
+    g.add_edge("log_done", END)
+
+    _air_ticket_graph = g.compile()
+    return _air_ticket_graph
+
+
+async def run_agent(
+    company_id: str,
+    employee_id: Optional[str] = None,
+    payload: dict | None = None,
+    api_mode: str = "mock",
+) -> dict:
+    p = payload or {}
+    initial: dict = {
+        "company_id": company_id,
+        "employee_id": employee_id or p.get("employee_id", ""),
+        "employee_name": p.get("employee_name", ""),
+        "nationality": p.get("nationality", ""),
+        "home_country": p.get("home_country", "india"),
+        "join_date": p.get("join_date", "2020-01-01"),
+        "ticket_type": p.get("ticket_type", "economy"),
+        "includes_family": p.get("includes_family", False),
+        "family_members": int(p.get("family_members", 1)),
+        "years_of_service": 0.0,
+        "eligible": False,
+        "eligibility_reason": "",
+        "ticket_value_aed": "0.00",
+        "approved": False,
+        "return_date": p.get("return_date", ""),
+        "report": {},
+        "api_mode": api_mode,
+    }
+
+    graph = create_air_ticket_graph()
+    if graph:
+        try:
+            final = await graph.ainvoke(initial)
+            return final.get("report", {"company_id": company_id, "api_mode": api_mode})
+        except Exception as exc:
+            logger.exception("air_ticket_agent.error", error=str(exc))
+
+    return {"company_id": company_id, "error": "LangGraph unavailable", "api_mode": api_mode}

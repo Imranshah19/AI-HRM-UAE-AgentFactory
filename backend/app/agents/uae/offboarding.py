@@ -1,357 +1,280 @@
 """
-Offboarding Agent UAE — Employee exit + final settlement automation.
+Offboarding Agent UAE — LangGraph StateGraph for employee exit + final settlement.
 
-UAE Law:
-  - Final settlement MUST be paid within 14 days of exit
-  - Visa MUST be cancelled within 30 days of employment end
-  - Legal penalties for non-compliance
+UAE requirements:
+  - Final settlement within 14 days of last working day
+  - Gratuity calculation (see gratuity.py)
+  - Visa cancellation (30-day grace after labour card cancellation)
+  - Labour card cancellation via MOHRE
+  - Emirates ID deactivation notification
 
-Final settlement includes:
-  1. Gratuity (via gratuity_agent)
-  2. Unused annual leave encashment
-  3. Air ticket entitlement (if unused + eligible)
-  4. Outstanding salary (pro-rated)
-  5. Less: salary advances / loans
-  6. Less: other approved deductions
+Nodes:
+  receive_exit → calculate_settlement → generate_documents
+  → create_checklist → send_deadline_alerts → log_done
 
-Trigger: POST /api/v1/uae/webhooks/employee/resigned OR terminated
+Claude reviews high-value settlement packages.
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
 from datetime import date, timedelta
-from decimal import Decimal
-from enum import Enum
-from typing import Any
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Optional
 
 import structlog
 
-from app.agents.uae.openclaw import get_openclaw
-
 logger = structlog.get_logger(__name__)
 
+try:
+    from langgraph.graph import StateGraph, START, END
+    from typing_extensions import TypedDict
+    LANGGRAPH_AVAILABLE = True
+except ImportError:
+    LANGGRAPH_AVAILABLE = False
 
-class ExitType(str, Enum):
-    RESIGNATION = "resignation"
-    TERMINATION = "termination"
-    CONTRACT_EXPIRY = "contract_expiry"
-    MUTUAL_AGREEMENT = "mutual_agreement"
-    DEATH = "death"
-    RETIREMENT = "retirement"
+from app.agents.uae.graph import claude_invoke, is_live_mode
+
+SETTLEMENT_DEADLINE_DAYS = 14
+
+if LANGGRAPH_AVAILABLE:
+    class OffboardingState(TypedDict):
+        company_id: str
+        employee_id: str
+        employee_name: str
+        exit_date: str
+        exit_reason: str
+        basic_salary: str
+        years_of_service: float
+        gratuity_amount: str
+        unpaid_salary: str
+        leave_encashment: str
+        other_deductions: str
+        total_settlement: str
+        settlement_deadline: str
+        days_to_deadline: int
+        checklist: list
+        documents: list
+        alerts_sent: bool
+        completed: bool
+        api_mode: str
 
 
-OFFBOARDING_CHECKLIST_ITEMS = [
-    {"id": "final_settlement_calc", "name_en": "Final settlement calculated", "name_ar": "تم احتساب المستحقات النهائية", "deadline_days": 0},
-    {"id": "final_settlement_paid", "name_en": "Final settlement paid", "name_ar": "تم صرف المستحقات النهائية", "deadline_days": 14, "legal": True},
-    {"id": "visa_cancel_initiated", "name_en": "Visa cancellation initiated", "name_ar": "بدء إلغاء التأشيرة", "deadline_days": 7},
-    {"id": "emirates_id_returned", "name_en": "Emirates ID returned", "name_ar": "إعادة الهوية الإماراتية", "deadline_days": 0},
-    {"id": "assets_returned", "name_en": "Company assets returned (laptop, phone, car)", "name_ar": "إعادة أصول الشركة", "deadline_days": 0},
-    {"id": "it_access_revoked", "name_en": "IT system access revoked", "name_ar": "إلغاء صلاحيات تقنية المعلومات", "deadline_days": 0},
-    {"id": "email_deactivated", "name_en": "Company email deactivated", "name_ar": "إلغاء تفعيل البريد الإلكتروني", "deadline_days": 0},
-    {"id": "mohre_updated", "name_en": "MOHRE records updated", "name_ar": "تحديث سجلات وزارة الموارد البشرية", "deadline_days": 7},
-    {"id": "final_wps_payment", "name_en": "Final WPS payment processed", "name_ar": "تم معالجة آخر دفعة رواتب", "deadline_days": 14},
-    {"id": "experience_letter", "name_en": "Experience letter issued", "name_ar": "إصدار شهادة الخبرة", "deadline_days": 14},
-    {"id": "noc_letter", "name_en": "NOC letter issued (if requested)", "name_ar": "إصدار خطاب عدم الممانعة", "deadline_days": 14},
-    {"id": "visa_cancelled", "name_en": "Visa cancellation completed", "name_ar": "اكتمال إلغاء التأشيرة", "deadline_days": 30, "legal": True},
-]
+def _receive_exit(state: dict) -> dict:
+    try:
+        exit_dt = date.fromisoformat(state.get("exit_date") or date.today().isoformat())
+        deadline = exit_dt + timedelta(days=SETTLEMENT_DEADLINE_DAYS)
+        days_left = (deadline - date.today()).days
+    except ValueError:
+        deadline = date.today() + timedelta(days=SETTLEMENT_DEADLINE_DAYS)
+        days_left = SETTLEMENT_DEADLINE_DAYS
+
+    try:
+        join_date = date.fromisoformat(state.get("join_date", "2020-01-01"))
+        exit_dt2 = date.fromisoformat(state.get("exit_date") or date.today().isoformat())
+        years = (exit_dt2 - join_date).days / 365.25
+    except (ValueError, KeyError):
+        years = state.get("years_of_service", 0.0)
+
+    return {
+        "settlement_deadline": deadline.isoformat(),
+        "days_to_deadline": days_left,
+        "years_of_service": round(years, 4),
+    }
 
 
-@dataclass
-class FinalSettlement:
-    employee_id: str
-    company_id: str
-    exit_date: str
-    exit_type: str
-    gratuity_aed: Decimal = field(default_factory=lambda: Decimal("0"))
-    unused_leave_encashment_aed: Decimal = field(default_factory=lambda: Decimal("0"))
-    air_ticket_aed: Decimal = field(default_factory=lambda: Decimal("0"))
-    partial_salary_aed: Decimal = field(default_factory=lambda: Decimal("0"))
-    loan_deduction_aed: Decimal = field(default_factory=lambda: Decimal("0"))
-    other_deductions_aed: Decimal = field(default_factory=lambda: Decimal("0"))
+def _calculate_settlement(state: dict) -> dict:
+    basic = Decimal(str(state.get("basic_salary", "0")))
+    years = Decimal(str(state.get("years_of_service", 0)))
+    reason = (state.get("exit_reason") or "resignation").lower()
+    daily_rate = basic / Decimal("30")
 
-    @property
-    def total_payable_aed(self) -> Decimal:
-        return (
-            self.gratuity_aed + self.unused_leave_encashment_aed +
-            self.air_ticket_aed + self.partial_salary_aed -
-            self.loan_deduction_aed - self.other_deductions_aed
+    # Gratuity (simplified — full calculation in gratuity.py)
+    if years < 1:
+        gratuity = Decimal("0")
+    elif years <= 5:
+        days = min(years, Decimal("5")) * Decimal("21")
+    else:
+        days = Decimal("5") * Decimal("21") + (years - Decimal("5")) * Decimal("30")
+        gratuity = (daily_rate * days).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        cap = basic * Decimal("24")
+        gratuity = min(gratuity, cap)
+
+    if years < 1:
+        gratuity = Decimal("0")
+    elif years <= 5:
+        g_days = min(years, Decimal("5")) * Decimal("21")
+        gratuity = (daily_rate * g_days).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        if reason == "resignation":
+            if years < 3:
+                gratuity = (gratuity * Decimal("0.3333")).quantize(Decimal("0.01"))
+            elif years < 5:
+                gratuity = (gratuity * Decimal("0.6667")).quantize(Decimal("0.01"))
+    else:
+        g_days = Decimal("5") * Decimal("21") + (years - Decimal("5")) * Decimal("30")
+        gratuity = (daily_rate * g_days).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        gratuity = min(gratuity, basic * Decimal("24"))
+
+    unpaid = Decimal(str(state.get("unpaid_salary", "0")))
+    leave_enc = Decimal(str(state.get("leave_encashment", "0")))
+    deductions = Decimal(str(state.get("other_deductions", "0")))
+    total = (gratuity + unpaid + leave_enc - deductions).quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+    return {
+        "gratuity_amount": str(gratuity),
+        "total_settlement": str(total),
+    }
+
+
+def _generate_documents(state: dict) -> dict:
+    docs = [
+        {"type": "Experience Certificate", "status": "pending"},
+        {"type": "Visa Cancellation Letter", "status": "pending"},
+        {"type": "Labour Card Cancellation (MOHRE)", "status": "pending"},
+        {"type": "Final Salary Statement", "status": "pending"},
+        {"type": "Gratuity Calculation Sheet", "status": "pending"},
+        {"type": "NOC (No Objection Certificate)", "status": "pending"},
+    ]
+    return {"documents": docs}
+
+
+def _create_checklist(state: dict) -> dict:
+    checklist = [
+        {"task": "Return company assets (laptop, access card, phone)", "done": False},
+        {"task": "Revoke system access (IT)", "done": False},
+        {"task": "Cancel company credit card", "done": False},
+        {"task": "Submit labour card to PRO for cancellation", "done": False},
+        {"task": "Process visa cancellation within 30 days", "done": False},
+        {"task": "Clear outstanding loans / advances", "done": False},
+        {"task": "Transfer knowledge / handover", "done": False},
+        {"task": "Conduct exit interview", "done": False},
+        {"task": "Transfer gratuity + final pay via WPS", "done": False},
+    ]
+    return {"checklist": checklist}
+
+
+def _send_deadline_alerts(state: dict) -> dict:
+    days = state.get("days_to_deadline", 14)
+    if days <= 3:
+        logger.error(
+            "offboarding.deadline_critical",
+            employee_id=state.get("employee_id"),
+            days=days,
+            total=state.get("total_settlement"),
+        )
+    elif days <= 7:
+        logger.warning(
+            "offboarding.deadline_approaching",
+            employee_id=state.get("employee_id"),
+            days=days,
+        )
+    return {"alerts_sent": True}
+
+
+def _log_done(state: dict) -> dict:
+    ai_note = ""
+    total = Decimal(str(state.get("total_settlement", "0")))
+
+    if is_live_mode() and total > Decimal("50000"):
+        prompt = (
+            f"High-value UAE offboarding: employee {state.get('employee_name')}, "
+            f"exit={state.get('exit_reason')}, years={round(state.get('years_of_service', 0), 1)}, "
+            f"total settlement AED {state.get('total_settlement')}. "
+            "Review for accuracy and advise on payment timeline and tax/legal considerations."
+        )
+        ai_note = claude_invoke(
+            system="You are a UAE end-of-service settlement specialist.",
+            user_message=prompt,
+            max_tokens=512,
         )
 
-    @property
-    def payment_deadline(self) -> str:
-        exit = date.fromisoformat(self.exit_date)
-        deadline = exit + timedelta(days=14)
-        return deadline.isoformat()
-
-    def to_dict(self) -> dict:
-        return {
-            "employee_id": self.employee_id,
-            "company_id": self.company_id,
-            "exit_date": self.exit_date,
-            "exit_type": self.exit_type,
-            "gratuity_aed": str(self.gratuity_aed),
-            "unused_leave_encashment_aed": str(self.unused_leave_encashment_aed),
-            "air_ticket_aed": str(self.air_ticket_aed),
-            "partial_salary_aed": str(self.partial_salary_aed),
-            "loan_deduction_aed": str(self.loan_deduction_aed),
-            "other_deductions_aed": str(self.other_deductions_aed),
-            "total_payable_aed": str(self.total_payable_aed),
-            "payment_deadline": self.payment_deadline,
-            "currency": "AED",
-            "legal_note": "Final settlement must be paid within 14 days — UAE Federal Decree-Law No. 33/2021",
-        }
+    logger.info(
+        "offboarding.completed",
+        employee_id=state.get("employee_id"),
+        total_settlement=state.get("total_settlement"),
+        deadline=state.get("settlement_deadline"),
+        ai_flagged=bool(ai_note),
+    )
+    return {"completed": True}
 
 
-@dataclass
-class OffboardingResult:
-    employee_id: str
-    company_id: str
-    exit_date: str
-    exit_type: str
-    final_settlement: dict = field(default_factory=dict)
-    checklist: list[dict] = field(default_factory=list)
-    visa_cancellation_deadline: str = ""
-    payment_deadline: str = ""
-    alerts: list[dict] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return self.__dict__
+_offboarding_graph = None
 
 
-class OffboardingAgent:
-    """
-    UAE employee offboarding automation.
-    Calculates final settlement and creates compliance checklist.
-    """
+def create_offboarding_graph():
+    global _offboarding_graph
+    if _offboarding_graph is not None or not LANGGRAPH_AVAILABLE:
+        return _offboarding_graph
 
-    def __init__(self):
-        self.claw = get_openclaw()
+    g: StateGraph = StateGraph(OffboardingState)
+    for name, fn in [
+        ("receive_exit", _receive_exit),
+        ("calculate_settlement", _calculate_settlement),
+        ("generate_documents", _generate_documents),
+        ("create_checklist", _create_checklist),
+        ("send_deadline_alerts", _send_deadline_alerts),
+        ("log_done", _log_done),
+    ]:
+        g.add_node(name, fn)
 
-    async def initiate_offboarding(
-        self,
-        employee_id: str,
-        company_id: str,
-        exit_type: str = ExitType.RESIGNATION,
-        exit_date: str | None = None,
-        db=None,
-    ) -> OffboardingResult:
-        today = exit_date or date.today().isoformat()
-        logger.info(
-            "offboarding_uae.initiate",
-            employee_id=employee_id,
-            exit_type=exit_type,
-        )
+    g.add_edge(START, "receive_exit")
+    g.add_edge("receive_exit", "calculate_settlement")
+    g.add_edge("calculate_settlement", "generate_documents")
+    g.add_edge("generate_documents", "create_checklist")
+    g.add_edge("create_checklist", "send_deadline_alerts")
+    g.add_edge("send_deadline_alerts", "log_done")
+    g.add_edge("log_done", END)
 
-        settlement = await self.calculate_final_settlement(
-            employee_id, company_id, exit_type=exit_type, exit_date=today, db=db
-        )
-
-        checklist = self._create_checklist(today)
-        exit_dt = date.fromisoformat(today)
-        visa_deadline = (exit_dt + timedelta(days=30)).isoformat()
-        payment_deadline = (exit_dt + timedelta(days=14)).isoformat()
-
-        result = OffboardingResult(
-            employee_id=employee_id,
-            company_id=company_id,
-            exit_date=today,
-            exit_type=exit_type,
-            final_settlement=settlement,
-            checklist=checklist,
-            visa_cancellation_deadline=visa_deadline,
-            payment_deadline=payment_deadline,
-        )
-
-        result.alerts = [
-            {
-                "day": 0,
-                "message": f"Offboarding initiated. Final settlement due by {payment_deadline}",
-                "level": "info",
-            },
-            {
-                "day": 14,
-                "message": "LEGAL: Final settlement must be paid today",
-                "level": "critical",
-            },
-            {
-                "day": 30,
-                "message": "LEGAL: Visa cancellation deadline today",
-                "level": "critical",
-            },
-        ]
-
-        if db:
-            try:
-                await self._save_offboarding(db, result)
-            except Exception as exc:
-                logger.warning("offboarding_uae.save_failed", error=str(exc))
-
-        return result
-
-    async def calculate_final_settlement(
-        self,
-        employee_id: str,
-        company_id: str,
-        exit_type: str = ExitType.RESIGNATION,
-        exit_date: str | None = None,
-        db=None,
-        **kwargs,
-    ) -> dict:
-        today = exit_date or date.today().isoformat()
-        emp_data = await self._load_employee_data(db, employee_id)
-
-        basic = Decimal(str(emp_data.get("basic_salary", 0)))
-        join_date = emp_data.get("join_date", (date.today() - timedelta(days=365)).isoformat())
-        daily_rate = basic / Decimal("30")
-
-        # Gratuity
-        from app.agents.uae.gratuity import get_gratuity_agent
-        gratuity_agent = get_gratuity_agent()
-        gratuity_calc = await gratuity_agent.calculate_gratuity(
-            employee_id, company_id, float(basic), join_date,
-            exit_date=today, exit_reason=exit_type
-        )
-
-        unused_days = Decimal(str(emp_data.get("unused_annual_leave_days", 0)))
-        leave_encashment = (unused_days * daily_rate).quantize(Decimal("0.01"))
-
-        air_ticket = Decimal("0")
-        if emp_data.get("air_ticket_eligible") and not emp_data.get("air_ticket_used_this_year"):
-            air_ticket = Decimal(str(emp_data.get("air_ticket_value_aed", 0)))
-
-        exit_dt = date.fromisoformat(today)
-        partial_days = Decimal(str(exit_dt.day))
-        partial_salary = (basic * partial_days / Decimal("30")).quantize(Decimal("0.01"))
-
-        loan_deduction = Decimal(str(emp_data.get("loan_outstanding", 0)))
-
-        settlement = FinalSettlement(
-            employee_id=employee_id,
-            company_id=company_id,
-            exit_date=today,
-            exit_type=exit_type,
-            gratuity_aed=gratuity_calc.gratuity_payable_aed,
-            unused_leave_encashment_aed=leave_encashment,
-            air_ticket_aed=air_ticket,
-            partial_salary_aed=partial_salary,
-            loan_deduction_aed=loan_deduction,
-        )
-        return settlement.to_dict()
-
-    async def update_checklist(
-        self,
-        employee_id: str,
-        company_id: str,
-        item_id: str,
-        completed: bool,
-        db=None,
-    ) -> dict:
-        logger.info(
-            "offboarding_uae.checklist_update",
-            employee_id=employee_id,
-            item=item_id,
-            completed=completed,
-        )
-        return {
-            "employee_id": employee_id,
-            "item_id": item_id,
-            "completed": completed,
-            "updated_at": date.today().isoformat(),
-        }
-
-    async def send_deadline_alerts(self, company_id: str, db=None) -> dict:
-        if db:
-            try:
-                from sqlalchemy import text
-                result = await db.execute(text("""
-                    SELECT al.employee_id, al.output_data->>'payment_deadline' as payment_deadline,
-                           al.output_data->>'visa_cancellation_deadline' as visa_deadline
-                    FROM agent_logs_uae al
-                    WHERE al.company_id = :co_id
-                      AND al.agent_name = 'OffboardingAgent'
-                      AND al.status = 'success'
-                      AND al.created_at >= NOW() - INTERVAL '60 days'
-                """), {"co_id": company_id})
-                rows = result.fetchall()
-                alerts_sent = len(rows)
-            except Exception:
-                alerts_sent = 0
-        else:
-            alerts_sent = 0
-
-        return {
-            "company_id": company_id,
-            "alerts_sent": alerts_sent,
-            "date": date.today().isoformat(),
-        }
-
-    def _create_checklist(self, exit_date: str) -> list[dict]:
-        exit_dt = date.fromisoformat(exit_date)
-        checklist = []
-        for item in OFFBOARDING_CHECKLIST_ITEMS:
-            deadline = (exit_dt + timedelta(days=item["deadline_days"])).isoformat() if item["deadline_days"] else exit_date
-            checklist.append({
-                **item,
-                "completed": False,
-                "deadline": deadline,
-                "is_legal_requirement": item.get("legal", False),
-            })
-        return checklist
-
-    async def _load_employee_data(self, db: Any, employee_id: str) -> dict:
-        if db:
-            try:
-                from sqlalchemy import text
-                result = await db.execute(text("""
-                    SELECT s.basic_salary, u.contract_start as join_date,
-                           u.air_ticket_entitlement as air_ticket_eligible,
-                           u.air_ticket_value_aed
-                    FROM employees_uae_profile u
-                    LEFT JOIN salary_structure_uae s ON s.employee_id = u.employee_id
-                    WHERE u.employee_id = :emp_id
-                """), {"emp_id": employee_id})
-                row = result.fetchone()
-                if row:
-                    return dict(row._mapping)
-            except Exception:
-                pass
-        return {
-            "basic_salary": 10000,
-            "join_date": (date.today() - timedelta(days=547)).isoformat(),
-            "air_ticket_eligible": True,
-            "air_ticket_value_aed": 3000,
-            "unused_annual_leave_days": 12,
-            "loan_outstanding": 0,
-        }
-
-    async def _save_offboarding(self, db: Any, result: OffboardingResult) -> None:
-        from sqlalchemy import text
-        await db.execute(text("""
-            INSERT INTO agent_logs_uae (
-                company_id, agent_name, task_type, employee_id,
-                input_data, output_data, status, triggered_by
-            ) VALUES (
-                :company_id, 'OffboardingAgent', 'offboarding', :employee_id,
-                :input, :output, 'success', 'webhook'
-            )
-        """), {
-            "company_id": result.company_id,
-            "employee_id": result.employee_id,
-            "input": json.dumps({"exit_type": result.exit_type}),
-            "output": json.dumps(result.to_dict(), default=str),
-        })
-        await db.commit()
+    _offboarding_graph = g.compile()
+    return _offboarding_graph
 
 
-# ─── Singleton ─────────────────────────────────────────────────────────────────
+async def run_agent(
+    company_id: str,
+    employee_id: Optional[str] = None,
+    payload: dict | None = None,
+    api_mode: str = "mock",
+) -> dict:
+    p = payload or {}
+    initial: dict = {
+        "company_id": company_id,
+        "employee_id": employee_id or p.get("employee_id", ""),
+        "employee_name": p.get("employee_name", ""),
+        "exit_date": p.get("exit_date", date.today().isoformat()),
+        "exit_reason": p.get("exit_reason", "resignation"),
+        "basic_salary": str(p.get("basic_salary", "10000")),
+        "years_of_service": float(p.get("years_of_service", 0)),
+        "gratuity_amount": "0",
+        "unpaid_salary": str(p.get("unpaid_salary", "0")),
+        "leave_encashment": str(p.get("leave_encashment", "0")),
+        "other_deductions": str(p.get("other_deductions", "0")),
+        "total_settlement": "0",
+        "settlement_deadline": "",
+        "days_to_deadline": SETTLEMENT_DEADLINE_DAYS,
+        "checklist": [],
+        "documents": [],
+        "alerts_sent": False,
+        "completed": False,
+        "api_mode": api_mode,
+    }
 
-_offboarding_agent: OffboardingAgent | None = None
+    graph = create_offboarding_graph()
+    if graph:
+        try:
+            final = await graph.ainvoke(initial)
+            return {
+                "employee_id": final.get("employee_id"),
+                "company_id": company_id,
+                "gratuity_amount": final.get("gratuity_amount"),
+                "total_settlement": final.get("total_settlement"),
+                "settlement_deadline": final.get("settlement_deadline"),
+                "days_to_deadline": final.get("days_to_deadline"),
+                "documents": final.get("documents", []),
+                "checklist": final.get("checklist", []),
+                "completed": final.get("completed"),
+                "currency": "AED",
+                "api_mode": api_mode,
+            }
+        except Exception as exc:
+            logger.exception("offboarding_agent.error", error=str(exc))
 
-
-def get_offboarding_agent() -> OffboardingAgent:
-    global _offboarding_agent
-    if _offboarding_agent is None:
-        _offboarding_agent = OffboardingAgent()
-    return _offboarding_agent
+    return {"company_id": company_id, "error": "LangGraph unavailable", "api_mode": api_mode}

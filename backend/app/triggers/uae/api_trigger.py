@@ -3,13 +3,16 @@ UAE Manual API Triggers — Human-initiated agent executions.
 
 Routes under prefix: /api/v1/uae/agent/trigger/
 For one-off manual runs: payroll, doc check, WPS validation, etc.
+
+All agent dispatch goes through graph.run_uae_task (LangGraph master graph).
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, status
+from datetime import date
+
+from fastapi import APIRouter, BackgroundTasks, status
 from pydantic import BaseModel
-from typing import Any
 
 import structlog
 
@@ -30,32 +33,32 @@ class ChatRequest(BaseModel):
     employee_id: str | None = None
     company_id: str | None = None
     user_role: str = "employee"
+    language: str = ""
+
+class LeaveBalanceRequest(BaseModel):
+    employee_id: str
+    company_id: str
+
+class GratuityRequest(BaseModel):
+    employee_id: str
+    basic_salary: float
+    join_date: str
+    exit_date: str
+    exit_reason: str = "resignation"
 
 
 # ─── Agent status & logs ───────────────────────────────────────────────────────
 
-@router.get("/status", summary="Get status of all 15 UAE agents")
+@router.get("/status", summary="Get status of all UAE agents (LangGraph)")
 async def get_agent_status() -> dict:
-    from app.agents.uae.paperclip import get_paperclip
-    paperclip = get_paperclip()
-    status_data = await paperclip.get_status()
-
-    from app.agents.uae.openclaw import get_openclaw
-    claw = get_openclaw()
-
-    return {
-        "agents": status_data["agents"],
-        "total_agents": status_data["total"],
-        "api_mode": "live" if claw.is_live else "mock",
-        "version": "UAE-1.0",
-    }
+    from app.agents.uae.graph import get_agent_status
+    return await get_agent_status()
 
 
 @router.get("/logs", summary="Get recent UAE agent execution logs")
 async def get_agent_logs(limit: int = 50) -> dict:
-    from app.agents.uae.paperclip import get_paperclip
-    paperclip = get_paperclip()
-    logs = await paperclip.get_logs(limit=limit)
+    from app.agents.uae.graph import get_agent_logs
+    logs = await get_agent_logs(limit=limit)
     return {"logs": logs, "count": len(logs)}
 
 
@@ -68,144 +71,173 @@ async def trigger_payroll(
     background_tasks: BackgroundTasks,
 ) -> dict:
     logger.info("api_trigger_uae.payroll", company_id=company_id)
+    today = date.today()
     background_tasks.add_task(
-        _run_payroll, company_id, payload.month, payload.year
+        _run_task_bg, "payroll", company_id, None,
+        {"month": payload.month or today.month, "year": payload.year or today.year},
     )
     return {
         "status": "triggered",
         "company_id": company_id,
-        "agent": "PayrollAgent",
+        "agent": "payroll",
         "message": "Payroll generation started in background",
     }
 
 
 @router.post("/trigger/wps-validate/{company_id}", summary="Validate WPS submission for a company")
 async def trigger_wps_validate(company_id: str) -> dict:
-    from app.agents.uae.wps import get_wps_agent
-    from datetime import date
-    agent = get_wps_agent()
+    from app.agents.uae.graph import run_uae_task
     today = date.today()
-    result = await agent.validate_wps_submission(
+    result = await run_uae_task(
+        task_type="wps",
         company_id=company_id,
-        month=today.month,
-        year=today.year,
+        payload={"month": today.month, "year": today.year},
     )
-    return {"company_id": company_id, "validation": result}
+    return {"company_id": company_id, "result": result}
 
 
-@router.post("/trigger/documents-check", summary="Run document expiry check for all companies")
-async def trigger_documents_check(background_tasks: BackgroundTasks) -> dict:
-    background_tasks.add_task(_run_documents_check_all)
+@router.post("/trigger/documents-check", summary="Run document expiry check")
+async def trigger_documents_check(
+    company_id: str,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    background_tasks.add_task(_run_task_bg, "document_check", company_id, None, {})
     return {
         "status": "triggered",
-        "agent": "DocumentAgent",
-        "message": "Document expiry check started for all companies",
+        "company_id": company_id,
+        "agent": "document",
+        "message": "Document expiry check started in background",
     }
 
 
 @router.post("/trigger/attendance-report", summary="Generate today's attendance report")
-async def trigger_attendance_report(company_id: str, background_tasks: BackgroundTasks) -> dict:
-    background_tasks.add_task(_run_attendance_report, company_id)
+async def trigger_attendance_report(
+    company_id: str,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    background_tasks.add_task(_run_task_bg, "attendance", company_id, None, {"event_type": "daily_report"})
     return {
         "status": "triggered",
         "company_id": company_id,
-        "agent": "AttendanceAgent",
+        "agent": "attendance",
     }
 
 
 @router.post("/trigger/emiratisation-check", summary="Run Emiratisation compliance check")
 async def trigger_emiratisation_check(company_id: str) -> dict:
-    from app.agents.uae.emiratisation import get_emiratisation_agent
-    agent = get_emiratisation_agent()
-    result = await agent.run_monthly_check(company_id=company_id)
-    return {
-        "company_id": company_id,
-        "result": result.to_dict(),
-        "agent": "EmiratiisationAgent",
-    }
+    from app.agents.uae.graph import run_uae_task
+    result = await run_uae_task(task_type="emiratisation", company_id=company_id)
+    return {"company_id": company_id, "result": result}
 
 
-@router.post("/trigger/gratuity-report", summary="Generate gratuity liability report")
-async def trigger_gratuity_report(company_id: str) -> dict:
-    from app.agents.uae.gratuity import get_gratuity_agent
-    agent = get_gratuity_agent()
-    result = await agent.generate_liability_report(company_id=company_id)
-    return {"company_id": company_id, "report": result}
+@router.post("/trigger/gratuity", summary="Calculate gratuity for an employee")
+async def trigger_gratuity(payload: GratuityRequest) -> dict:
+    from app.agents.uae.graph import run_uae_task
+    result = await run_uae_task(
+        task_type="gratuity",
+        company_id="",
+        employee_id=payload.employee_id,
+        payload={
+            "basic_salary": payload.basic_salary,
+            "join_date": payload.join_date,
+            "exit_date": payload.exit_date,
+            "exit_reason": payload.exit_reason,
+        },
+    )
+    return result
 
 
 @router.post("/trigger/wps-sif/{company_id}", summary="Generate WPS SIF file for a company")
 async def trigger_wps_sif(company_id: str) -> dict:
-    from app.agents.uae.wps import get_wps_agent
-    from datetime import date
-    agent = get_wps_agent()
+    from app.agents.uae.graph import run_uae_task
     today = date.today()
-    result = await agent.generate_sif_file(
+    result = await run_uae_task(
+        task_type="wps",
         company_id=company_id,
-        salary_month=today.month,
-        salary_year=today.year,
+        payload={"month": today.month, "year": today.year},
     )
+    wps_result = result.get("result", {})
     return {
         "company_id": company_id,
-        "sif_generated": True,
-        "is_valid": result.is_valid,
-        "total_employees": len(result.employees),
-        "total_amount_aed": str(result.total_amount_aed),
-        "sif_xml_preview": result.sif_xml[:500] + "..." if len(result.sif_xml) > 500 else result.sif_xml,
-        "validation_errors": result.validation_errors,
+        "sif_valid": wps_result.get("sif_valid"),
+        "coverage_pct": wps_result.get("coverage_pct"),
+        "sif_errors": wps_result.get("sif_errors", []),
+        "bank_errors": wps_result.get("bank_errors", []),
+        "sif_xml_preview": (wps_result.get("sif_xml", "")[:500] + "...") if wps_result.get("sif_xml") else "",
     }
+
+
+@router.post("/trigger/leave-balance", summary="Get leave balances for an employee")
+async def trigger_leave_balance(payload: LeaveBalanceRequest) -> dict:
+    from app.agents.uae.graph import run_uae_task
+    result = await run_uae_task(
+        task_type="leave_balance",
+        company_id=payload.company_id,
+        employee_id=payload.employee_id,
+    )
+    return result
+
+
+@router.post("/trigger/insurance-check/{company_id}", summary="Run insurance compliance check")
+async def trigger_insurance_check(company_id: str) -> dict:
+    from app.agents.uae.graph import run_uae_task
+    result = await run_uae_task(task_type="insurance", company_id=company_id)
+    return result
+
+
+@router.post("/trigger/contract-check/{company_id}", summary="Run contract expiry check")
+async def trigger_contract_check(company_id: str) -> dict:
+    from app.agents.uae.graph import run_uae_task
+    result = await run_uae_task(task_type="contract", company_id=company_id)
+    return result
 
 
 # ─── Chatbot endpoint ──────────────────────────────────────────────────────────
 
-@router.post("/chat", summary="UAE multilingual HR chatbot")
+@router.post("/chat", summary="UAE multilingual HR chatbot (EN/AR/UR/HI/TL)")
 async def chat_with_hr_agent(payload: ChatRequest) -> dict:
-    from app.agents.uae.chatbot import get_hr_chatbot_agent
-    agent = get_hr_chatbot_agent()
-    response = await agent.answer(
-        message=payload.message,
-        session_id=payload.session_id,
+    from app.agents.uae.graph import run_uae_task
+    result = await run_uae_task(
+        task_type="chat",
+        company_id=payload.company_id or "",
         employee_id=payload.employee_id,
-        company_id=payload.company_id,
-        user_role=payload.user_role,
+        payload={
+            "message": payload.message,
+            "session_id": payload.session_id,
+            "language": payload.language,
+        },
     )
-    return response.to_dict()
+    chat_result = result.get("result", {})
+    return {
+        "response": chat_result.get("response", ""),
+        "language": chat_result.get("language", "en"),
+        "intent": chat_result.get("intent", ""),
+        "session_id": payload.session_id,
+        "api_mode": result.get("api_mode", "mock"),
+    }
 
 
-# ─── Background runners ────────────────────────────────────────────────────────
+# ─── Shared background runner ──────────────────────────────────────────────────
 
-async def _run_payroll(company_id: str, month: int | None, year: int | None) -> None:
+async def _run_task_bg(
+    task_type: str,
+    company_id: str,
+    employee_id: str | None,
+    payload: dict,
+) -> None:
     try:
-        from app.agents.uae.payroll import get_payroll_agent
-        agent = get_payroll_agent()
-        await agent.generate_payroll(
+        from app.agents.uae.graph import run_uae_task
+        result = await run_uae_task(
+            task_type=task_type,
             company_id=company_id,
-            payroll_month=month,
-            payroll_year=year,
+            employee_id=employee_id,
+            payload=payload,
         )
-        logger.info("api_trigger_uae.payroll_complete", company_id=company_id)
-    except Exception as exc:
-        logger.error("api_trigger_uae.payroll_failed", error=str(exc))
-
-
-async def _run_documents_check_all() -> None:
-    try:
-        from app.agents.uae.document import get_document_agent
-        agent = get_document_agent()
-        result = await agent.check_all_expiries()
-        logger.info("api_trigger_uae.docs_check_complete", alerts=result.total_alerts)
-    except Exception as exc:
-        logger.error("api_trigger_uae.docs_check_failed", error=str(exc))
-
-
-async def _run_attendance_report(company_id: str) -> None:
-    try:
-        from app.agents.uae.attendance import get_attendance_agent
-        agent = get_attendance_agent()
-        result = await agent.generate_daily_report(company_id=company_id)
         logger.info(
-            "api_trigger_uae.attendance_report_complete",
+            "api_trigger_uae.task_complete",
+            task_type=task_type,
             company_id=company_id,
-            present=result.present_count,
+            status=result.get("status"),
         )
     except Exception as exc:
-        logger.error("api_trigger_uae.attendance_report_failed", error=str(exc))
+        logger.error("api_trigger_uae.task_failed", task_type=task_type, error=str(exc))
