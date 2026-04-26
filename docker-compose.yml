@@ -89,7 +89,8 @@ services:
     dns:
       - 8.8.8.8
       - 8.8.4.4
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app"
     environment:
       - APP_ENV=development
       - DEBUG=true
@@ -113,6 +114,7 @@ services:
       - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
       - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     ports:
       - "8000:8000"
     volumes:
@@ -145,7 +147,7 @@ services:
     dns:
       - 8.8.8.8
       - 8.8.4.4
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4 -Q default,payroll,notifications,reports
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4 -Q default,payroll,notifications,reports,uae_compliance,uae_payroll,uae_attendance,uae_hr
     environment:
       - APP_ENV=development
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-hrms_user}:${POSTGRES_PASSWORD:-hrms_password}@postgres:5432/${POSTGRES_DB:-hrms_db}
@@ -160,6 +162,7 @@ services:
       - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
       - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     volumes:
       - ./backend:/app
       - uploads_data:/uploads
