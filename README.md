@@ -365,7 +365,7 @@ pytest tests/ -v
 
 ## License
 
-MIT
+Private — All Rights Reserved © 2026 Syed Imran Shah
 
 ---
 
