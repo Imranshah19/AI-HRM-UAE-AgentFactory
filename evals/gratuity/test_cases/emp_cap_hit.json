@@ -1,0 +1,33 @@
+{
+  "case_id": "emp_cap_hit",
+  "description": "30 years service, basic 10000. Uncapped amount = AED 285000 but the 2-year basic salary cap (24 months × 10000 = 240000) applies. Must report capped=true and the cap amount.",
+  "ground_truth": "official_worked_example",
+  "law_reference": "Federal Decree-Law No. 33/2021, Article 51 §3",
+  "input": {
+    "employee_id": "emp-30yr",
+    "basic_salary": "10000",
+    "join_date": "1996-01-01",
+    "exit_date": "2026-01-01",
+    "exit_reason": "completion",
+    "unpaid_salary": "0",
+    "leave_encashment": "0"
+  },
+  "calculation_trace": {
+    "service_years": "30.0",
+    "daily_rate": "10000 / 30 = 333.3333...",
+    "gratuity_days_first_5": "5 × 21 = 105",
+    "gratuity_days_beyond_5": "25 × 30 = 750",
+    "total_days": "855",
+    "gratuity_uncapped": "855 × (10000/30) = 285000.00",
+    "cap_limit": "24 × 10000 = 240000.00",
+    "capped": true,
+    "final_amount": "240000.00 (capped)"
+  },
+  "expected": {
+    "status": "READY",
+    "gratuity_amount": "240000.00",
+    "total_settlement": "240000.00",
+    "capped": true,
+    "invariant": "worker must log/flag that cap was applied so the human can see it in the report"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "case_id": "emp_5yr_exact",
+  "description": "Exact 5-year boundary — must use the 21-days-per-year rate, not 30. One day less and it would be prorated; one day more and year-6 rate kicks in.",
+  "ground_truth": "official_worked_example",
+  "law_reference": "Federal Decree-Law No. 33/2021, Article 51 §1",
+  "input": {
+    "employee_id": "emp-5yr",
+    "basic_salary": "10000",
+    "join_date": "2021-01-01",
+    "exit_date": "2026-01-01",
+    "exit_reason": "termination",
+    "unpaid_salary": "0",
+    "leave_encashment": "0"
+  },
+  "calculation_trace": {
+    "service_years": "5.0 (exactly)",
+    "daily_rate": "10000 / 30 = 333.3333...",
+    "gratuity_days": "5 × 21 = 105 (not 30-day rate yet — that applies from year 6)",
+    "gratuity": "105 × (10000/30) = 1050000/30 = 35000.00",
+    "capped": false
+  },
+  "expected": {
+    "status": "READY",
+    "gratuity_amount": "35000.00",
+    "total_settlement": "35000.00",
+    "capped": false,
+    "gratuity_days": 105.0,
+    "currency": "AED"
+  }
+}

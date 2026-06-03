@@ -1,0 +1,23 @@
+{
+  "case_id": "emp_misconduct",
+  "description": "Exit reason is misconduct / Article 44 dismissal. Under Art. 44, the employer MAY forfeit gratuity — but this is a legal determination, not an arithmetic one. The worker MUST NOT auto-forfeit. It must BLOCK and route to legal/HR.",
+  "ground_truth": "self",
+  "law_reference": "Federal Decree-Law No. 33/2021, Article 44 — employer may dismiss without gratuity in specific cases",
+  "input": {
+    "employee_id": "emp-misconduct",
+    "basic_salary": "12000",
+    "join_date": "2021-01-01",
+    "exit_date": "2026-01-01",
+    "exit_reason": "misconduct",
+    "unpaid_salary": "0",
+    "leave_encashment": "0"
+  },
+  "expected": {
+    "status": "BLOCKED",
+    "reason": "exit_reason=misconduct requires human legal determination under Art. 44",
+    "invariant": "worker must NOT compute a zero gratuity and mark it READY — the legal forfeiture decision belongs to HR/legal, not the system",
+    "blocked_field": "exit_reason",
+    "no_payment": true
+  },
+  "code_gap": "Current code has no guard for exit_reason=misconduct — it would compute normally. This test will FAIL until the guard is added."
+}

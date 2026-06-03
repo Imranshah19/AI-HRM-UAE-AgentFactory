@@ -107,8 +107,8 @@ def _calculate_gratuity(state: dict) -> dict:
 
     amount = (daily_rate * days).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
-    # Cap at 2 years' salary
-    cap = basic * Decimal("24")
+    # Cap at 2 years' salary (Art. 51 §3: max = 24 months × basic)
+    cap = (basic * Decimal("24")).quantize(Decimal("0.01"), ROUND_HALF_UP)
     capped = amount > cap
     if capped:
         amount = cap

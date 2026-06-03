@@ -1,0 +1,35 @@
+{
+  "case_id": "emp_unpaid_leave",
+  "description": "3-year contract but 60 calendar days of unpaid leave. UAE law (Art. 29) excludes unpaid leave from service calculation. Service = (3×365 - 60) / 365.25 days. Expected gratuity is LESS than a full 3-year entitlement.",
+  "ground_truth": "self",
+  "law_reference": "Federal Decree-Law No. 33/2021, Article 29 — unpaid leave not counted in service",
+  "input": {
+    "employee_id": "emp-unpaid",
+    "basic_salary": "9000",
+    "join_date": "2023-01-01",
+    "exit_date": "2026-01-01",
+    "exit_reason": "resignation",
+    "unpaid_leave_days": 60,
+    "unpaid_salary": "0",
+    "leave_encashment": "0"
+  },
+  "calculation_trace": {
+    "calendar_days": "3 × 365 = 1095",
+    "unpaid_leave_days": "60",
+    "credited_days": "1095 - 60 = 1035",
+    "service_years_365_25": "1035 / 365.25 ≈ 2.8332",
+    "service_years_365": "1035 / 365 ≈ 2.8356",
+    "note": "year-length method is an open assumption — confirm with legal (§5 of eval_plan)",
+    "daily_rate": "9000 / 30 = 300",
+    "gratuity_days": "≈ 2.8332 × 21 ≈ 59.50",
+    "gratuity_approx": "≈ 300 × 59.50 ≈ 17849"
+  },
+  "expected": {
+    "status": "READY",
+    "gratuity_amount_less_than_full_3yr": "56700.00",
+    "gratuity_amount_approx": "~17849",
+    "capped": false,
+    "invariant": "gratuity_amount MUST be less than the full 3-year value of 18900.00 (= 3 × 21 × 300). If it equals or exceeds 18900, unpaid leave was NOT deducted.",
+    "open_assumption": "exact value depends on year-length method (365 vs 365.25) — track in eval_plan §5"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "case_id": "emp_resign_eq_terminate",
+  "description": "Same employee, same dates, same basic — run once with exit_reason=resignation and once with exit_reason=termination. Under Federal Decree-Law 33/2021 Art. 51, both must produce IDENTICAL gratuity. The old-law reductions (1/3 for <3yr, 2/3 for <5yr) were abolished in 2021.",
+  "ground_truth": "official_worked_example",
+  "law_reference": "Federal Decree-Law No. 33/2021, Article 51 — no reduction for resignation",
+  "input_resign": {
+    "employee_id": "emp-resign",
+    "basic_salary": "10000",
+    "join_date": "2022-01-01",
+    "exit_date": "2026-01-01",
+    "exit_reason": "resignation",
+    "unpaid_salary": "0",
+    "leave_encashment": "0"
+  },
+  "input_terminate": {
+    "employee_id": "emp-terminate",
+    "basic_salary": "10000",
+    "join_date": "2022-01-01",
+    "exit_date": "2026-01-01",
+    "exit_reason": "termination",
+    "unpaid_salary": "0",
+    "leave_encashment": "0"
+  },
+  "calculation_trace": {
+    "service_years": "4.0 (exactly)",
+    "daily_rate": "10000 / 30 = 333.33...",
+    "gratuity_days": "4 × 21 = 84",
+    "gratuity_new_law": "84 × (10000/30) = 840000/30 = 28000.00",
+    "gratuity_old_law_resign": "84 × 0.6667 × (10000/30) ≈ 18666.67 (WRONG under new law)"
+  },
+  "expected": {
+    "status_resign": "READY",
+    "status_terminate": "READY",
+    "gratuity_resign": "28000.00",
+    "gratuity_terminate": "28000.00",
+    "must_be_identical": true,
+    "invariant": "gratuity_resign == gratuity_terminate — any difference means old-law reduction code is still active"
+  },
+  "code_gap": "Current gratuity.py lines 102-106 apply the old-law reduction for 3-5yr resignations. Remove those lines to fix. This test WILL FAIL against the current code."
+}

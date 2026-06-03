@@ -1,0 +1,22 @@
+{
+  "case_id": "emp_missing_basic",
+  "description": "basic_salary field is null / missing. Worker must BLOCK and name the missing field. It must NOT default to zero and silently produce a NIL-gratuity result — that would mask a data error.",
+  "ground_truth": "self",
+  "law_reference": "system invariant — never guess missing data",
+  "input": {
+    "employee_id": "emp-nobasic",
+    "basic_salary": null,
+    "join_date": "2020-01-01",
+    "exit_date": "2026-01-01",
+    "exit_reason": "resignation",
+    "unpaid_salary": "0",
+    "leave_encashment": "0"
+  },
+  "expected": {
+    "status": "BLOCKED",
+    "blocked_field": "basic_salary",
+    "invariant": "worker must NOT default null basic_salary to '0' — that produces a gratuity_amount of 0.00 which looks like NIL entitlement, masking the real problem",
+    "no_db_modification": true
+  },
+  "code_gap": "Current code defaults basic_salary to '10000' in run_agent() and '0' in the state — neither is correct. If basic_salary is null in the DB, it should BLOCK."
+}

@@ -1,0 +1,28 @@
+{
+  "case_id": "emp_under_1yr",
+  "description": "8 months of service — below the 1-year threshold. Must return NIL gratuity with a clear reason. This is NOT an error — it is a valid outcome. Status must reflect zero entitlement, not a system failure.",
+  "ground_truth": "official_worked_example",
+  "law_reference": "Federal Decree-Law No. 33/2021, Article 51 — entitlement starts after 1 year",
+  "input": {
+    "employee_id": "emp-8mo",
+    "basic_salary": "8000",
+    "join_date": "2025-05-01",
+    "exit_date": "2026-01-01",
+    "exit_reason": "resignation",
+    "unpaid_salary": "0",
+    "leave_encashment": "0"
+  },
+  "calculation_trace": {
+    "service_days": "245",
+    "service_years": "~0.67 (< 1)",
+    "entitlement": "NIL — must complete at least 1 year"
+  },
+  "expected": {
+    "status": "NIL",
+    "gratuity_amount": "0.00",
+    "total_settlement": "0.00",
+    "capped": false,
+    "notes_contains": "Less than 1 year",
+    "invariant": "NIL is not BLOCKED — the worker completes successfully with zero amount"
+  }
+}

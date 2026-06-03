@@ -1,0 +1,25 @@
+{
+  "case_id": "emp_uae_national",
+  "description": "Employee is a UAE national (is_emirati=true). UAE nationals in the private sector are covered by GPSSA (General Pension and Social Security Authority) — they receive pension, not MOHRE gratuity. Worker must FLAG this and route to HR, not compute a lump-sum gratuity.",
+  "ground_truth": "self",
+  "law_reference": "Federal Law No. 7/1999 (GPSSA) + Federal Decree-Law 33/2021 exclusion for GPSSA members",
+  "input": {
+    "employee_id": "emp-emirati",
+    "basic_salary": "15000",
+    "join_date": "2020-01-01",
+    "exit_date": "2026-01-01",
+    "exit_reason": "resignation",
+    "is_emirati": true,
+    "nafis_enrolled": true,
+    "unpaid_salary": "0",
+    "leave_encashment": "0"
+  },
+  "expected": {
+    "status": "FLAGGED",
+    "reason": "UAE national — covered by GPSSA pension scheme, not MOHRE gratuity",
+    "gratuity_amount": null,
+    "action_required": "Route to HR for GPSSA entitlement calculation",
+    "invariant": "worker must NOT silently compute a MOHRE lump-sum for a GPSSA member"
+  },
+  "code_gap": "Current code has no is_emirati guard — would compute MOHRE gratuity for a UAE national. This test will FAIL until the guard is added."
+}

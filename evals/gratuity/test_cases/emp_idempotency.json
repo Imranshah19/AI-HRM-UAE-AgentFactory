@@ -1,0 +1,28 @@
+{
+  "case_id": "emp_idempotency",
+  "description": "Run the gratuity calculation twice for the same employee with identical inputs. Both runs must produce identical output — same gratuity_amount, same total_settlement, same notes. Gratuity is deterministic; any difference between runs indicates non-deterministic behaviour (e.g. LLM in the arithmetic path).",
+  "ground_truth": "self",
+  "input": {
+    "employee_id": "emp-idem",
+    "basic_salary": "10000",
+    "join_date": "2020-01-01",
+    "exit_date": "2026-01-01",
+    "exit_reason": "termination",
+    "unpaid_salary": "0",
+    "leave_encashment": "0"
+  },
+  "test_procedure": [
+    "1. Run worker → capture result_1",
+    "2. Run worker again with identical inputs → capture result_2",
+    "3. Assert: result_1.gratuity_amount == result_2.gratuity_amount",
+    "4. Assert: result_1.total_settlement == result_2.total_settlement",
+    "5. Assert: result_1.capped == result_2.capped",
+    "6. Assert: result_1.gratuity_days == result_2.gratuity_days"
+  ],
+  "expected": {
+    "gratuity_amount_run1": "45000.00",
+    "gratuity_amount_run2": "45000.00",
+    "must_be_equal": true,
+    "invariant": "no LLM in the arithmetic path — Claude is called only for cap-edge explanations when ANTHROPIC_API_KEY is set, and that output is notes only, not the amount"
+  }
+}
