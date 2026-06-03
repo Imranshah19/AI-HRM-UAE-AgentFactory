@@ -20,6 +20,8 @@ celery_app = Celery(
         "app.tasks.leave_tasks",
         "app.tasks.payroll_tasks",
         "app.tasks.recruitment_tasks",
+        # UAE AI-HRM tasks
+        "app.tasks.uae.wps_tasks",
     ],
 )
 
@@ -37,6 +39,8 @@ celery_app.conf.update(
         "app.tasks.leave_tasks.*":      {"queue": "notifications"},
         "app.tasks.payroll_tasks.*":    {"queue": "payroll"},
         "app.tasks.recruitment_tasks.*": {"queue": "notifications"},
+        # UAE queues
+        "app.tasks.uae.wps_tasks.*":    {"queue": "uae_payroll"},
     },
     # Beat schedule (periodic tasks)
     beat_schedule={},
