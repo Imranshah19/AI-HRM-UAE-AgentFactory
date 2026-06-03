@@ -2,105 +2,99 @@
 name: uae-wps-compliance
 description: >
   Use this skill when generating or validating a UAE Wage Protection System
-  (WPS) SIF file for monthly payroll. Covers MOHRE SIF format, UAE Labour Law
-  wage rules (Federal Decree-Law No. 33 of 2021), WPS deadlines and penalties,
-  IBAN/Emirates ID validation, and the exact checks a SIF must pass before a
-  human approves it. Trigger for any task mentioning WPS, SIF, salary file,
-  MOHRE wage submission, or UAE payroll compliance.
+  (WPS) SIF file for monthly payroll. Covers the SIF delimited-text format
+  (SCR/EDR/EVP records), filename convention, UAE Labour Law wage rules
+  (Federal Decree-Law No. 33 of 2021), WPS deadlines and penalties
+  (Ministerial Resolution 598 of 2022), IBAN/Emirates ID validation, and the
+  checks a SIF must pass before a human approves it. Trigger for any task
+  mentioning WPS, SIF, salary file, MOHRE wage submission, or UAE payroll
+  compliance.
 version: 2.0
 ---
 
 # UAE WPS Compliance Skill
 
-Portable domain expertise for any worker handling UAE Wage Protection System tasks.
-Physical SIF format details are in `sif_format_reference.md` (same directory).
+This file is the worker's portable expertise. For the exact field-by-field
+layout, see `sif_format_reference.md` in this same folder. **This skill points
+to that reference for format details - never re-hard-code the format in Python.**
 
 ## What WPS is
 
-The **Wage Protection System (WPS)** is the UAE electronic salary transfer system mandated by MOHRE (Ministry of Human Resources & Emiratisation). Employers must pay registered employees through WPS-approved banks/exchanges and submit a **SIF (Salary Information File)** each month. Non-compliance triggers fines and can freeze new work-permit issuance.
+The Wage Protection System (WPS) is the UAE's mandatory electronic salary
+system (MOHRE + Central Bank of UAE). Each pay cycle the employer submits a
+**SIF (Salary Information File)** through a WPS-authorised bank/agent.
+Non-compliance leads to fines + possible freeze on new work permits.
 
-## SIF file structure (v2 — corrected)
+## CRITICAL format facts (v2 correction)
 
-A SIF is **comma-delimited plain text** with two record types. No XML.
+- **A SIF is a comma-delimited plain TEXT file with a `.SIF` extension - NOT XML.**
+- Record types are **SCR** (employer control record, 1 per file), **EDR**
+  (employee detail record, 1 per employee), and optional **EVP** (variable-pay
+  breakdown). There is **no "SDR"**.
+- The **filename is itself validated**: `[13-digit Employer ID][YYMMDD][HHMMSS].SIF`,
+  exactly 25 chars + extension; its date/time must match the SCR record.
+- Full field layout + examples -> `sif_format_reference.md`.
 
-**SCR — Salary Control Record** (one per file, employer-level):
-```
-SCR, employerID(13,zero-pad), agentRouting(9), creationDate(YYYY-MM-DD),
-     creationTime(HH:MM:SS), salaryMonth(MMYYYY), recordCount,
-     totalSalary(2dp), AED, employerName(≤35)
-```
+## When to use this skill
 
-**EDR — Employee Detail Record** (one per employee):
-```
-EDR, personID(14,zero-pad), agentRouting(9), IBAN(23),
-     payStart(YYYY-MM-DD), payEnd(YYYY-MM-DD), daysWorked,
-     fixed(2dp), variable(2dp), leaveDays
-```
+- Building the monthly SIF file
+- Validating a SIF before submission
+- Checking WPS deadline / penalty risk
+- Answering "is this payroll WPS-compliant?"
 
-**Totals rule:** `SCR.totalSalary = Σ EDR(fixed + variable)` — exact, no rounding drift.
+## The non-negotiable validation rules
 
-**Money format:** 2 decimal places, dot separator, no thousands comma. (`4000.00` not `4,000.00`).
+1. SCR total salary == sum of (all EDR fixed + variable), exact to the fils.
+2. SCR record count == number of EDR lines.
+3. SCR salary month (MMYYYY) matches every EDR's pay period - else the WHOLE file rejects.
+4. Each IBAN: valid 23-char UAE IBAN (`AE` prefix, mod-97 passes).
+5. Each employee has a valid Emirates ID / labour-card number.
+6. Currency is `AED`; employer name <= 35 chars.
+7. No negative/zero net for an active full-month employee (data error -> escalate).
+8. No employee with an expired labour card silently included -> flag.
 
-**Record order:** configurable via `SIF_RECORD_ORDER` env var (`scr_first` | `scr_last`). Never hard-coded — different banks require different orderings.
+> **"Looks right" is not success.** Success = these checks pass AND the output is
+> validated against the bank's own SIF validation tool before any live run.
 
-**Filename:** `{employerID:0>13}{YYMMDD}{HHMMSS}.SIF` — 25 chars before extension. Date/time must match the SCR fields exactly.
+## UAE Labour Law context
 
-See `sif_format_reference.md` for field widths and examples.
-
-## UAE Labour Law rules the worker must respect
-
-- Governing law: **Federal Decree-Law No. 33 of 2021** (+ 2024 amendments).
-- All contracts are fixed-term (unlimited contracts abolished 2022).
-- Wages must be paid within the period set by the contract; WPS submission is due within the MOHRE window after the wage due date. Late = penalty exposure.
-- Salary currency is **AED**.
-- Ramadan: working hours reduced by 2 hours/day (affects attendance-linked variable pay, not SIF format).
-
-## Validation checklist (8 blocking checks + 1 warning)
-
-Run ALL. File is BLOCKED if any blocking check fails.
-
-| # | Check | Blocking |
-|---|-------|---------|
-| 1 | Employee count in SIF == active payroll count for the month | Yes |
-| 2 | Each IBAN: 23 chars, `AE` prefix, passes mod-97 check | Yes |
-| 3 | Each employee has Emirates ID or labour card number | Yes |
-| 4 | SCR totalSalary == Σ EDR (fixed+variable), exact to the fil | Yes |
-| 5 | Establishment ID present; salary month/year correct | Yes |
-| 6 | No negative or zero net for any active full-month employee | Yes |
-| 7 | Employer name ≤ 35 chars | Yes |
-| 8 | SCR salary month (MMYYYY) matches payroll_month of every row | Yes |
-| — | Expired labour card: flag in report + notify, but do not BLOCK | Warning |
-
-After all 8 pass: structural check — exactly 1 SCR + N EDR lines, all fields present.
+- Governing law: Federal Decree-Law No. 33 of 2021 (+2024 amendments).
+- All contracts fixed-term (unlimited abolished 2022).
+- WPS submission due within the MOHRE window after wage due date (commonly
+  cited 15 days; Ministerial Resolution 598/2022). Late = penalty exposure.
+- Currency: AED. Ramadan: 2-hour daily reduction (affects attendance-linked
+  variable pay, not the SIF format).
 
 ## Hard rules (non-negotiable)
 
-- **Read-only** on employee/payroll data. The SIF is an output, never an edit.
-- **Never submit, pay, or transfer.** Produce the file; a human approves and submits.
-- **Never invent data.** Missing IBAN/EID → STOP and escalate with the exact employee list.
-- **Never auto-correct a total mismatch.** A mismatch means upstream data is wrong — that is a human's call.
+- **Read-only** on employee/payroll data; the SIF is an output, never an edit.
+- **Never submit, encrypt-for-transport, or pay.** Produce the validated `.SIF`;
+  a human uploads via the bank/WPS portal.
+- **Never invent data.** Missing IBAN/EID -> STOP and escalate with the exact
+  employee list.
+- **Never auto-correct a total mismatch** - that means upstream data is wrong;
+  it's a human's call.
+- **Never hard-code record order** (SCR-first vs SCR-last varies by bank) - keep
+  it a config value; see `sif_format_reference.md` section 7.
 
-## Escalation phrasing
+## Escalation phrasing (specific + actionable)
 
-Specific and actionable:
-> "WPS SIF for {Company} {Month} is BLOCKED: {n} employee(s) {issue} — [{IDs}]. {Action}. WPS deadline in {N} days."
-
-Example:
-> "WPS SIF for co-001 2026-04 is BLOCKED: 2 employees missing IBAN — [emp-104, emp-119]. Add IBANs in employees_uae_profile.bank_iban and re-run. WPS deadline in 4 days."
+> "WPS SIF for {Company} {Month} is BLOCKED: 2 employees have invalid IBAN -
+> [E-104 Ahmed, E-119 Bilal]. Fix in the system, then re-run. WPS deadline in 4 days."
 
 ## Quick reference
 
 | Item | Value |
 |---|---|
-| Authority | MOHRE |
-| File format | Comma-delimited text (.SIF) — not XML |
-| Records | SCR (employer) + EDR (employee) — no SDR |
-| Currency | AED, 2dp, dot separator |
-| Law | Federal Decree-Law No. 33/2021 (+2024) |
-| IBAN | 23 chars, `AE` prefix, mod-97 valid |
-| Worker authority | Generate + validate ONLY — no submit, no pay |
-| Record order | `SIF_RECORD_ORDER` env var (scr_first \| scr_last) |
+| Authority | MOHRE + Central Bank of UAE |
+| File | SIF - comma-delimited `.SIF` text (NOT XML) |
+| Records | SCR (employer) / EDR (employee) / EVP (optional) |
+| Filename | 25 chars: EmployerID(13)+YYMMDD+HHMMSS + `.SIF` |
+| Currency | AED |
+| IBAN | 23 chars, `AE`, mod-97 valid |
+| Deadline | per MOHRE window (Min. Res. 598/2022) |
+| Worker authority | Generate + validate ONLY - no submit, no pay |
 
-> **Note:** Exact MOHRE SIF field widths and deadline windows change over time.
-> Always confirm the current MOHRE SIF specification before a live submission.
-> `sif_format_reference.md` is the structural guide, not the authoritative spec.
+> **Note:** SIF field widths, record order, and deadlines can change by bank/agent
+> and over time. `sif_format_reference.md` is a reference, not a substitute for the
+> current official MOHRE/bank SIF specification. Always validate via the bank's tool.
