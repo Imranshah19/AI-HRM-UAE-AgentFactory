@@ -184,13 +184,25 @@ def _check_1_all_employees_included(
     )
 
 
+def _iban_mod97(iban: str) -> bool:
+    """Standard mod-97 IBAN integrity check (ISO 13616)."""
+    rearranged = iban[4:] + iban[:4]
+    numeric = "".join(str(ord(c) - 55) if c.isalpha() else c for c in rearranged)
+    return int(numeric) % 97 == 1
+
+
 def _check_2_iban_valid(profiles: list[dict]) -> tuple[CheckResult, list[dict]]:
-    """Check 2: every employee has a valid 23-digit UAE IBAN."""
+    """
+    Check 2: every employee has a valid 23-char UAE IBAN that passes mod-97.
+    Skill: uae-wps-compliance §Validation checklist item 2.
+    """
     bad: list[dict] = []
     for p in profiles:
         iban = (p.get("bank_iban") or "").strip()
         if not iban.startswith("AE") or len(iban) != 23:
-            bad.append({"employee_id": p["employee_id"], "iban": iban or "(blank)"})
+            bad.append({"employee_id": p["employee_id"], "iban": iban or "(blank)", "reason": "format"})
+        elif not _iban_mod97(iban):
+            bad.append({"employee_id": p["employee_id"], "iban": iban, "reason": "mod-97 failed"})
     if bad:
         return CheckResult(
             name="iban_valid",
@@ -200,7 +212,7 @@ def _check_2_iban_valid(profiles: list[dict]) -> tuple[CheckResult, list[dict]]:
     return CheckResult(
         name="iban_valid",
         passed=True,
-        detail=f"All {len(profiles)} IBANs valid (AE + 23 chars)",
+        detail=f"All {len(profiles)} IBANs valid (AE prefix, 23 chars, mod-97 pass)",
     ), []
 
 
@@ -288,6 +300,32 @@ def _check_6_sif_format(sif_xml: str) -> CheckResult:
     )
 
 
+def _check_6_no_negative_zero_net(payroll_rows: list[dict]) -> tuple[CheckResult, list[dict]]:
+    """
+    Check 6: no active employee has a negative or zero net salary.
+    Skill: uae-wps-compliance §Validation checklist item 6.
+    A zero/negative net means upstream data is wrong — escalate, never auto-fix.
+    """
+    bad: list[dict] = []
+    for row in payroll_rows:
+        net = Decimal(str(row.get("net_salary") or "0"))
+        if net <= Decimal("0"):
+            bad.append({"employee_id": row["employee_id"], "net_salary": str(net)})
+    if bad:
+        return CheckResult(
+            name="no_negative_zero_net",
+            passed=False,
+            detail=f"{len(bad)} employee(s) have non-positive net salary — "
+                   "upstream payroll data must be corrected: "
+                   f"{[b['employee_id'] for b in bad]}",
+        ), bad
+    return CheckResult(
+        name="no_negative_zero_net",
+        passed=True,
+        detail=f"All {len(payroll_rows)} employees have positive net salary",
+    ), []
+
+
 def _check_7_labour_card_expiry(profiles: list[dict], today: date) -> CheckResult:
     """
     Check 7: flag employees with an expired labour card.
@@ -330,43 +368,79 @@ def _build_sif(
     month: int,
 ) -> tuple[str, str]:
     """
-    Build MOHRE SIF XML.
+    Build MOHRE SIF XML with EDR (Employer Detail Record) + SDR (Salary Detail Records).
+    Skill: uae-wps-compliance §The SIF file.
+
+    NOTE: This XML is the internal representation. The MOHRE portal accepts a
+    delimited text format whose field widths/order change with spec revisions.
+    Confirm the current MOHRE SIF specification before a production submission.
+
     Returns (sif_xml_string, total_net_aed_string).
     """
     profile_map = {p["employee_id"]: p for p in profiles}
     today = date.today()
+    total_calendar_days = calendar.monthrange(year, month)[1]
 
     root = ET.Element("SalaryInformation")
     root.set("xmlns", "http://www.mohre.gov.ae/wps/sif/v1")
+    root.set("version", "1.0")
 
-    header = ET.SubElement(root, "Header")
-    ET.SubElement(header, "EmployerID").text = company.get("mohre_establishment_id") or company["id"]
-    ET.SubElement(header, "PayrollMonth").text = f"{year}-{month:02d}"
-    ET.SubElement(header, "GeneratedDate").text = today.isoformat()
-    ET.SubElement(header, "TotalEmployees").text = str(len(payroll_rows))
+    # ── EDR: Employer Detail Record ───────────────────────────────────────────
+    edr = ET.SubElement(root, "EDR")
+    ET.SubElement(edr, "EstablishmentID").text  = company.get("mohre_establishment_id") or str(company["id"])
+    ET.SubElement(edr, "EstablishmentName").text = company.get("name_en", "")
+    ET.SubElement(edr, "SalaryMonth").text      = f"{month:02d}"
+    ET.SubElement(edr, "SalaryYear").text       = str(year)
+    ET.SubElement(edr, "GeneratedDate").text    = today.isoformat()
+    ET.SubElement(edr, "Currency").text         = "AED"
+    ET.SubElement(edr, "TotalRecords").text     = str(len(payroll_rows))
+    # TotalSalary populated after SDR loop (totals rule)
+    edr_total_el = ET.SubElement(edr, "TotalSalary")
 
-    salaries = ET.SubElement(root, "Salaries")
+    # ── SDRs: Salary Detail Records ───────────────────────────────────────────
+    sdrs = ET.SubElement(root, "SDRs")
     total_net = Decimal("0")
 
     for row in payroll_rows:
-        eid = row["employee_id"]
+        eid     = row["employee_id"]
         profile = profile_map.get(eid, {})
+
+        basic       = Decimal(str(row.get("basic_salary")      or "0"))
+        housing     = Decimal(str(row.get("housing_allowance") or "0"))
+        transport   = Decimal(str(row.get("transport_allowance") or "0"))
+        food        = Decimal(str(row.get("food_allowance")    or "0"))
+        other_allow = Decimal(str(row.get("other_allowances")  or "0"))
+        ot_amount   = Decimal(str(row.get("overtime_amount")   or "0"))
+        deductions  = Decimal(str(row.get("iloe_deduction")    or "0")) + \
+                      Decimal(str(row.get("other_deductions")  or "0")) + \
+                      Decimal(str(row.get("loan_deduction")    or "0")) + \
+                      Decimal(str(row.get("advance_deduction") or "0"))
+
+        fixed_component    = (basic + housing + transport + food + other_allow).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        variable_component = ot_amount.quantize(Decimal("0.01"), ROUND_HALF_UP)
         net = Decimal(str(row.get("net_salary") or "0")).quantize(Decimal("0.01"), ROUND_HALF_UP)
         total_net += net
 
-        rec = ET.SubElement(salaries, "SalaryRecord")
-        ET.SubElement(rec, "EmployeeID").text     = eid
-        ET.SubElement(rec, "EmiratesID").text     = (profile.get("emirates_id") or "").strip()
-        ET.SubElement(rec, "LabourCardNo").text   = (profile.get("labour_card_number") or "").strip()
-        ET.SubElement(rec, "IBAN").text           = (profile.get("bank_iban") or "").strip()
-        ET.SubElement(rec, "BankName").text       = (profile.get("bank_name") or "").strip()
-        ET.SubElement(rec, "NetSalary").text      = str(net)
-        ET.SubElement(rec, "Currency").text       = "AED"
-        ET.SubElement(rec, "SalaryFrequency").text = "M"  # Monthly
+        days_worked = int(row.get("actual_days_worked") or total_calendar_days)
+        leave_days  = int(row.get("leave_deduction_days") or 0)
+
+        sdr = ET.SubElement(sdrs, "SDR")
+        ET.SubElement(sdr, "EmployeeID").text        = eid
+        ET.SubElement(sdr, "EmiratesID").text        = (profile.get("emirates_id") or "").strip()
+        ET.SubElement(sdr, "LabourCardNo").text      = (profile.get("labour_card_number") or "").strip()
+        ET.SubElement(sdr, "IBAN").text              = (profile.get("bank_iban") or "").strip()
+        ET.SubElement(sdr, "BankName").text          = (profile.get("bank_name") or "").strip()
+        ET.SubElement(sdr, "FixedComponent").text    = str(fixed_component)   # basic + allowances
+        ET.SubElement(sdr, "VariableComponent").text = str(variable_component) # overtime
+        ET.SubElement(sdr, "Deductions").text        = str(deductions.quantize(Decimal("0.01"), ROUND_HALF_UP))
+        ET.SubElement(sdr, "DaysWorked").text        = str(days_worked)
+        ET.SubElement(sdr, "LeaveDays").text         = str(leave_days)
+        ET.SubElement(sdr, "NetSalary").text         = str(net)
+        ET.SubElement(sdr, "Currency").text          = "AED"
+        ET.SubElement(sdr, "SalaryFrequency").text   = "M"
 
     total_str = str(total_net.quantize(Decimal("0.01"), ROUND_HALF_UP))
-    ET.SubElement(header, "TotalAmount").text   = total_str
-    ET.SubElement(header, "Currency").text      = "AED"
+    edr_total_el.text = total_str  # EDR total = sum of all SDR nets (totals rule)
 
     sif_xml = ET.tostring(root, encoding="unicode", xml_declaration=True)
     return sif_xml, total_str
@@ -523,7 +597,11 @@ async def _run_wps_worker(company_id: str, salary_month: str) -> WPSRunResult:
     chk5 = _check_5_establishment_id(company)
     result.checks.append(chk5)
 
-    # Check 7 before building SIF (non-blocking but logged)
+    # Check 6: no negative/zero net (skill: uae-wps-compliance §6)
+    chk6_net, bad_net = _check_6_no_negative_zero_net(payroll_rows)
+    result.checks.append(chk6_net)
+
+    # Check 7: expired labour card (non-blocking warning)
     chk7 = _check_7_labour_card_expiry(profiles, today)
     result.checks.append(chk7)
 
@@ -535,11 +613,22 @@ async def _run_wps_worker(company_id: str, salary_month: str) -> WPSRunResult:
             blocked_emps.append({**emp, "reason": "invalid IBAN"})
         for emp in bad_id:
             blocked_emps.append({**emp, "reason": "missing Emirates ID and labour card"})
+        for emp in bad_net:
+            blocked_emps.append({**emp, "reason": "non-positive net salary"})
         result.blocked_employees = blocked_emps
 
+        days_left = _days_to_wps_deadline(year, month)
+        # Skill escalation phrasing: specific + actionable
         for chk in blocking_fails:
-            log.error("wps_worker.check_failed", check=chk.name, detail=chk.detail)
-        log.error("wps_worker.blocked", failing_checks=[c.name for c in blocking_fails])
+            log.error(
+                "wps_worker.blocked",
+                check=chk.name,
+                message=(
+                    f"WPS SIF for {company_id} {salary_month} is BLOCKED: "
+                    f"{chk.detail}. "
+                    f"WPS deadline in {days_left} day(s)."
+                ),
+            )
         return result  # status stays BLOCKED
 
     # ── Build SIF (only when all blocking checks pass) ─────────────────────────
