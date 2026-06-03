@@ -1,0 +1,29 @@
+{
+  "case_id": "{{worker_slug}}_{{scenario}}",
+  "description": "{{What this case proves. One sentence. Include the known-correct value if deterministic.}}",
+  "ground_truth": "official_worked_example | official_sample | self",
+  "law_reference": "{{Federal Decree-Law / Article / Ministerial Resolution, if applicable}}",
+  "input": {
+    "company_id": "co-001",
+    "{{param_1}}": "{{value}}",
+    "{{param_2}}": "{{value}}"
+  },
+  "fixture_data": {
+    "{{table_name}}": [
+      {
+        "{{column}}": "{{value}}"
+      }
+    ]
+  },
+  "calculation_trace": {
+    "{{step_1}}": "{{formula or value}}",
+    "{{step_2}}": "{{formula or value}}",
+    "result": "{{expected final value}}"
+  },
+  "expected": {
+    "status": "READY_FOR_APPROVAL | BLOCKED | NIL | FLAGGED",
+    "{{key_metric}}": "{{expected value}}",
+    "blocked_employees": [],
+    "invariant": "{{What must be true regardless of implementation. E.g. DB must not be modified.}}"
+  }
+}
