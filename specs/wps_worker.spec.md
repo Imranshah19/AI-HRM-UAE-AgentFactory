@@ -3,7 +3,7 @@
 > **File:** `specs/wps_worker.spec.md`
 > **Project:** AI-HRM-UAE-AgentFactory
 > **Owner (Human Principal):** Syed Imran Shah
-> **Version:** 1.0
+> **Version:** 1.1
 > **Status:** Active
 
 This is the **brief**, not the code. It defines *what* the worker does, *where it stops*, and *what "correct" means* — written BEFORE any agent runs. (This is the "first 10%" that was missing.)
@@ -44,9 +44,13 @@ Generate the monthly **WPS SIF file** (Salary Information File) for each company
 
 | Output | Where |
 |---|---|
-| SIF file (MOHRE format) | `outputs/wps/{company_id}/{salary_month}.SIF` |
+| SIF file — comma-delimited plain text, .SIF extension (NOT XML) | `outputs/wps/{company_id}/{EmployerID13}{YYMMDD}{HHMMSS}.SIF` |
 | Validation report (pass/fail per check) | `outputs/wps/{company_id}/{salary_month}_report.md` |
 | Status event (`READY_FOR_APPROVAL` / `BLOCKED`) | logged + notification |
+
+Filename convention: exactly 25 chars before the extension — 13-char zero-padded employer ID + 6-char date (YYMMDD) + 6-char time (HHMMSS). Date/time must equal the SCR record's `creationDate`/`creationTime` fields.
+
+Physical format defined in `skills/uae-wps-compliance/sif_format_reference.md`.
 
 ## 5. System of Record
 
@@ -57,14 +61,20 @@ The **PostgreSQL database is the single source of truth.** The worker reads agai
 The SIF is only `READY_FOR_APPROVAL` if **all** of these pass:
 
 1. Every active employee for the month is included (count matches payroll)
-2. Every employee has a valid 23-digit IBAN
+2. Every employee has a valid 23-char UAE IBAN (AE prefix + mod-97 integrity check)
 3. Every employee has a valid Emirates ID / labour card number
-4. Total SIF amount == total finalized net payroll (exact match, AED)
-5. Salary month and establishment ID are correct
-6. SIF passes MOHRE format/structure check
-7. No employee with an expired labour card in the run (else flag)
+4. SCR totalSalary == Σ EDR (fixed + variable) — exact AED match, no rounding drift
+5. Establishment ID present and salary month/year correct
+6. No negative or zero net salary for any active full-month employee
+7. Employer name ≤ 35 chars (SCR field width limit)
+8. SCR salary month (MMYYYY) matches the payroll_month/year of every row
 
-> **"Looks right" is not success.** Verification = these 7 checks pass. (Principle 3)
+Plus one non-blocking flag (does not block READY status):
+- **Expired labour card**: produce file but flag in report + notify
+
+After all 8 pass: SIF structure check — exactly 1 SCR + N EDR lines, all fields present.
+
+> **"Looks right" is not success.** Verification = these 8 checks + structure check pass. (Principle 3)
 
 ## 7. Constraints & Authority Limits
 
