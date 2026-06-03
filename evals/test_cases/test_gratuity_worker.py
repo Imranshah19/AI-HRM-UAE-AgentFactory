@@ -24,6 +24,7 @@ from app.agents.uae.gratuity import (
     _calculate_settlement,
     _determine_scenario,
     _fetch_service,
+    _validate_inputs,
 )
 
 
@@ -195,31 +196,24 @@ def test_over_5yr_termination_notes():
 #
 # Once fixed, remove the xfail markers.
 
-@pytest.mark.xfail(
-    reason="Code gap: gratuity.py lines 102-106 apply old-law reductions. "
-           "Federal Decree-Law 33/2021 Art. 51 abolished them. "
-           "Remove the resignation reduction block to fix.",
-    strict=True,
-)
 def test_resign_4yr_equals_terminate_4yr():
-    """4 years: resign must equal terminate (28000.00) — no 2/3 reduction."""
+    """
+    4 years: Federal Decree-Law 33/2021 — resignation == termination, no reduction.
+    Expected: 4 × 21 × (10000/30) = 28000.00
+    """
     g_resign    = gratuity(10000, 4.0, reason="resignation")
     g_terminate = gratuity(10000, 4.0, reason="termination")
-    assert g_resign == g_terminate, (
-        f"Resign={g_resign}, Terminate={g_terminate} — "
-        "old-law reduction still active (expected equal under new law)"
-    )
+    assert g_resign == g_terminate == "28000.00"
 
 
-@pytest.mark.xfail(
-    reason="Code gap: same resignation reduction bug, 2-year case.",
-    strict=True,
-)
 def test_resign_2yr_equals_terminate_2yr():
-    """2 years: resign must equal terminate (14000.00) — no 1/3 reduction."""
+    """
+    2 years: Federal Decree-Law 33/2021 — no 1/3 old-law reduction.
+    Expected: 2 × 21 × (10000/30) = 14000.00
+    """
     g_resign    = gratuity(10000, 2.0, reason="resignation")
     g_terminate = gratuity(10000, 2.0, reason="termination")
-    assert g_resign == g_terminate
+    assert g_resign == g_terminate == "14000.00"
 
 
 def test_resign_over_5yr_already_equals_terminate():
@@ -240,6 +234,92 @@ def test_resign_over_5yr_already_equals_terminate():
     (1.0, 10000, "7000.00"),    # 1 × 21 × (10000/30) = 7000
     (1.0, 9000,  "6300.00"),    # 1 × 21 × (9000/30)  = 6300
     (30.0, 10000, "240000.00"), # capped
+    (4.0, 10000, "28000.00"),   # resignation == termination (new law)
+    (2.0, 10000, "14000.00"),   # resignation == termination (new law)
 ])
 def test_known_values_table(years, basic, expected):
     assert gratuity(basic, years) == expected
+
+
+# ─── Guard tests (FIX 2) ──────────────────────────────────────────────────────
+
+def test_misconduct_blocks():
+    """exit_reason=misconduct → BLOCKED, no gratuity computed (Art. 44 is a legal call)."""
+    result = _validate_inputs({
+        "basic_salary": "10000",
+        "exit_reason": "misconduct",
+        "is_emirati": False,
+    })
+    assert result["blocked"] is True
+    assert "misconduct" in result["blocked_reason"].lower()
+    assert "Art. 44" in result["blocked_reason"] or "legal" in result["blocked_reason"].lower()
+
+
+def test_emirati_flags_gpssa():
+    """is_emirati=True → BLOCKED with GPSSA reason (not MOHRE gratuity)."""
+    result = _validate_inputs({
+        "basic_salary": "15000",
+        "exit_reason": "resignation",
+        "is_emirati": True,
+    })
+    assert result["blocked"] is True
+    assert "GPSSA" in result["blocked_reason"] or "gpssa" in result["blocked_reason"].lower()
+    assert "pension" in result["blocked_reason"].lower() or "national" in result["blocked_reason"].lower()
+
+
+def test_missing_basic_blocks():
+    """basic_salary=None → BLOCKED, DB must not be modified."""
+    result = _validate_inputs({
+        "basic_salary": None,
+        "exit_reason": "resignation",
+        "is_emirati": False,
+    })
+    assert result["blocked"] is True
+    assert "basic_salary" in result["blocked_reason"].lower() or "missing" in result["blocked_reason"].lower()
+
+
+def test_zero_basic_blocks():
+    """basic_salary='0' → BLOCKED (not silently NIL)."""
+    result = _validate_inputs({
+        "basic_salary": "0",
+        "exit_reason": "resignation",
+        "is_emirati": False,
+    })
+    assert result["blocked"] is True
+
+
+def test_empty_basic_blocks():
+    """basic_salary='' → BLOCKED."""
+    result = _validate_inputs({
+        "basic_salary": "",
+        "exit_reason": "resignation",
+        "is_emirati": False,
+    })
+    assert result["blocked"] is True
+
+
+def test_valid_inputs_not_blocked():
+    """Clean inputs must NOT be blocked by the guard."""
+    result = _validate_inputs({
+        "basic_salary": "10000",
+        "exit_reason": "resignation",
+        "is_emirati": False,
+    })
+    assert result["blocked"] is False
+    assert result["blocked_reason"] == ""
+
+
+def test_guard_does_not_compute_amount_when_blocked():
+    """When a guard blocks, the calculation must not run."""
+    state = {
+        "basic_salary": "10000",
+        "exit_reason": "misconduct",
+        "is_emirati": False,
+        "years_of_service": 6.0,
+    }
+    guard_result = _validate_inputs(state)
+    assert guard_result["blocked"] is True
+    # If we incorrectly ran _calculate_gratuity on a blocked state,
+    # it would return a non-zero amount. Guard must stop it.
+    # (The graph handles this via conditional edge — this test checks guard output only.)
+    assert "gratuity_amount" not in guard_result

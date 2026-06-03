@@ -1,17 +1,23 @@
 """
 Gratuity Agent UAE — LangGraph StateGraph for end-of-service gratuity.
 
-Federal Decree-Law No. 33/2021:
+Federal Decree-Law No. 33/2021 (effective 02 Feb 2022):
   - <1 yr service: no gratuity
   - 1–5 yr: 21 days basic per year
   - >5 yr: 30 days basic per year (capped at 2 years' salary)
-  - Resignation <1yr: nil; 1–3yr: 1/3; 3–5yr: 2/3; >5yr: full
+  - Resignation == termination: SAME entitlement (old-law reductions abolished)
+
+Guards (run before calculation):
+  - missing/zero basic_salary → BLOCKED
+  - exit_reason=misconduct → BLOCKED (Art. 44 is a legal, not arithmetic, decision)
+  - is_emirati=True → BLOCKED (GPSSA pension scheme, not MOHRE gratuity)
 
 Nodes:
-  fetch_service → determine_scenario → calculate_gratuity
-  → calculate_settlement → generate_report
+  validate_inputs → (blocked? → generate_report)
+                 → fetch_service → determine_scenario → calculate_gratuity
+                 → calculate_settlement → generate_report
 
-Claude validates complex edge cases.
+Claude validates capped/anomalous results only — never in the arithmetic path.
 """
 
 from __future__ import annotations
@@ -37,10 +43,11 @@ if LANGGRAPH_AVAILABLE:
     class GratuityState(TypedDict):
         company_id: str
         employee_id: str
-        basic_salary: str
+        basic_salary: str         # empty string = missing → guard blocks
         join_date: str
         exit_date: str
-        exit_reason: str          # "resignation" | "termination" | "completion"
+        exit_reason: str          # "resignation" | "termination" | "completion" | "misconduct"
+        is_emirati: bool          # True → GPSSA route, not MOHRE gratuity
         years_of_service: float
         gratuity_days: float
         gratuity_amount: str
@@ -49,8 +56,65 @@ if LANGGRAPH_AVAILABLE:
         total_settlement: str
         currency: str
         capped: bool
+        blocked: bool             # True if a guard tripped before calculation
+        blocked_reason: str
         notes: str
         api_mode: str
+
+
+def _validate_inputs(state: dict) -> dict:
+    """
+    Run ALL guards before touching any calculation.
+    Returns blocked=True + reason if any guard trips; otherwise blocked=False.
+
+    Guards (per change list — decided, not legally pending):
+      1. missing/zero basic_salary   → BLOCKED (never default)
+      2. exit_reason=misconduct      → BLOCKED (Art. 44 is a legal call)
+      3. is_emirati=True             → BLOCKED (GPSSA route, not MOHRE gratuity)
+    """
+    basic_raw   = (state.get("basic_salary") or "").strip()
+    exit_reason = (state.get("exit_reason") or "").lower().strip()
+    is_emirati  = bool(state.get("is_emirati", False))
+
+    if not basic_raw or basic_raw in ("0", "0.00"):
+        return {
+            "blocked": True,
+            "blocked_reason": (
+                "basic_salary is missing or zero — cannot compute gratuity. "
+                "Fix in the source system before re-running."
+            ),
+        }
+    try:
+        if Decimal(basic_raw) <= Decimal("0"):
+            return {
+                "blocked": True,
+                "blocked_reason": f"basic_salary must be positive, got: {basic_raw!r}",
+            }
+    except Exception:
+        return {
+            "blocked": True,
+            "blocked_reason": f"basic_salary is not a valid number: {basic_raw!r}",
+        }
+
+    if exit_reason == "misconduct":
+        return {
+            "blocked": True,
+            "blocked_reason": (
+                "exit_reason=misconduct — forfeiture under Art. 44 "
+                "is a legal determination, not arithmetic. Route to HR/legal."
+            ),
+        }
+
+    if is_emirati:
+        return {
+            "blocked": True,
+            "blocked_reason": (
+                "is_emirati=True — UAE nationals are covered by GPSSA pension scheme, "
+                "not MOHRE end-of-service gratuity. Route to HR for GPSSA entitlement."
+            ),
+        }
+
+    return {"blocked": False, "blocked_reason": ""}
 
 
 def _fetch_service(state: dict) -> dict:
@@ -98,12 +162,8 @@ def _calculate_gratuity(state: dict) -> dict:
     else:
         days = Decimal("5") * Decimal("21") + (Decimal(str(years)) - Decimal("5")) * Decimal("30")
 
-    # Resignation reduction
-    if reason == "resignation":
-        if years < 3:
-            days = days * Decimal("0.3333")
-        elif years < 5:
-            days = days * Decimal("0.6667")
+    # Federal Decree-Law 33/2021: resignation == termination, no reduction.
+    # The old-law 1/3 / 2/3 blocks (Federal Law 8/1980) are abolished as of 02 Feb 2022.
 
     amount = (daily_rate * days).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
@@ -129,6 +189,14 @@ def _calculate_settlement(state: dict) -> dict:
 
 
 def _generate_report(state: dict) -> dict:
+    if state.get("blocked"):
+        logger.warning(
+            "gratuity.blocked",
+            employee_id=state.get("employee_id"),
+            reason=state.get("blocked_reason"),
+        )
+        return {"notes": f"BLOCKED: {state.get('blocked_reason', '')}"}
+
     ai_note = ""
     if is_live_mode() and state.get("capped"):
         prompt = (
@@ -161,15 +229,21 @@ def create_gratuity_graph():
 
     g: StateGraph = StateGraph(GratuityState)
     for name, fn in [
-        ("fetch_service", _fetch_service),
+        ("validate_inputs",   _validate_inputs),
+        ("fetch_service",     _fetch_service),
         ("determine_scenario", _determine_scenario),
         ("calculate_gratuity", _calculate_gratuity),
         ("calculate_settlement", _calculate_settlement),
-        ("generate_report", _generate_report),
+        ("generate_report",   _generate_report),
     ]:
         g.add_node(name, fn)
 
-    g.add_edge(START, "fetch_service")
+    g.add_edge(START, "validate_inputs")
+    g.add_conditional_edges(
+        "validate_inputs",
+        lambda s: "generate_report" if s.get("blocked") else "fetch_service",
+        {"generate_report": "generate_report", "fetch_service": "fetch_service"},
+    )
     g.add_edge("fetch_service", "determine_scenario")
     g.add_edge("determine_scenario", "calculate_gratuity")
     g.add_edge("calculate_gratuity", "calculate_settlement")
@@ -187,13 +261,16 @@ async def run_agent(
     api_mode: str = "mock",
 ) -> dict:
     p = payload or {}
+    # Never default basic_salary — missing means BLOCKED (guard catches it).
+    basic_raw = p.get("basic_salary")
     initial: dict = {
         "company_id": company_id,
         "employee_id": employee_id or p.get("employee_id", ""),
-        "basic_salary": str(p.get("basic_salary", "10000")),
+        "basic_salary": str(basic_raw).strip() if basic_raw is not None else "",
         "join_date": p.get("join_date", "2020-01-01"),
         "exit_date": p.get("exit_date", date.today().isoformat()),
         "exit_reason": p.get("exit_reason", "resignation"),
+        "is_emirati": bool(p.get("is_emirati", False)),
         "years_of_service": 0.0,
         "gratuity_days": 0.0,
         "gratuity_amount": "0",
@@ -202,6 +279,8 @@ async def run_agent(
         "total_settlement": "0",
         "currency": "AED",
         "capped": False,
+        "blocked": False,
+        "blocked_reason": "",
         "notes": "",
         "api_mode": api_mode,
     }
@@ -213,6 +292,8 @@ async def run_agent(
             return {
                 "employee_id": final.get("employee_id"),
                 "company_id": company_id,
+                "blocked": final.get("blocked", False),
+                "blocked_reason": final.get("blocked_reason", ""),
                 "years_of_service": final.get("years_of_service"),
                 "gratuity_days": final.get("gratuity_days"),
                 "gratuity_amount": final.get("gratuity_amount"),
