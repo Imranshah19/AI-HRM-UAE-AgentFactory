@@ -355,18 +355,25 @@ def test_filename_employer_id_zero_padded():
     assert fn.startswith("000000CO00001")   # 13 chars total, zero-padded left
 
 def test_filename_matches_scr_datetime():
+    """
+    Filename = EmployerID(13) + YYMMDD(6) + HHMMSS(6) = 25 chars.
+    SCR time is HHMM (4 chars) by default per DIB reference.
+    The HHMM portion of the filename must match the SCR time field.
+    (§6 of sif_format_reference.md notes this ambiguity — confirm with your bank.)
+    """
     sif_text, _, filename = _build_sif_delimited(
         COMPANY_OK, PAYROLL_OK, PROFILES_OK, 2026, 4, CREATION_DT,
     )
     scr = next(l for l in sif_text.splitlines() if l.startswith("SCR,")).split(",")
-    scr_date = scr[3]  # YYYY-MM-DD
-    scr_time = scr[4]  # HH:MM:SS
-    # filename: ...YYMMDD HHMMSS.SIF
+    scr_date = scr[3]   # YYYY-MM-DD
+    scr_time = scr[4]   # HHMM (4 digits, default) or HHMMSS (6 digits if env set)
+
     base = filename.replace(".SIF", "")
-    fn_date = base[13:19]  # YYMMDD
-    fn_time = base[19:25]  # HHMMSS
-    assert scr_date[2:4] + scr_date[5:7] + scr_date[8:10] == fn_date  # YY MM DD
-    assert scr_time.replace(":", "") == fn_time
+    fn_date = base[13:19]   # YYMMDD
+    fn_hhmm = base[19:23]   # first 4 digits of time portion
+
+    assert scr_date[2:4] + scr_date[5:7] + scr_date[8:10] == fn_date
+    assert scr_time[:4] == fn_hhmm   # HHMM portion always matches
 
 
 # ─── SIF format check ─────────────────────────────────────────────────────────

@@ -432,7 +432,10 @@ def _build_sif_delimited(
     pay_end   = date(year, month, total_calendar_days).isoformat()
     salary_month_field = f"{month:02d}{year}"  # MMYYYY per MOHRE spec
     creation_date = creation_dt.strftime("%Y-%m-%d")
-    creation_time = creation_dt.strftime("%H:%M:%S")
+    # SCR time format varies by bank: HHMM (DIB reference) or HHMMSS (others).
+    # Set SIF_SCR_TIME_FORMAT=HHMMSS in .env if your bank requires 6 digits.
+    scr_time_fmt = os.environ.get("SIF_SCR_TIME_FORMAT", "HHMM")
+    creation_time = creation_dt.strftime("%H%M%S" if scr_time_fmt == "HHMMSS" else "%H%M")
     employer_name = (company.get("name_en") or "")[:35]  # enforced by check_7
 
     # Build EDR lines first (need Σ to populate SCR total)

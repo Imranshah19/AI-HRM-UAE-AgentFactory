@@ -1,129 +1,148 @@
-# SIF Format Reference — UAE MOHRE WPS
+# UAE WPS SIF — File Format Reference
 
-> **Purpose:** structural guide for building and validating SIF files.
-> **Not** the authoritative MOHRE spec — confirm current field widths with MOHRE before live submission.
+> **File:** `skills/uae-wps-compliance/sif_format_reference.md`
+> **Purpose:** The single source of truth for *how* a SIF file is physically built.
+> **Status:** Reference Implementation detail (the format can change by bank/MOHRE; the spec's rules don't).
+> **Verify against:** your bank/agent's official SIF template + the bank's SIF validation tool before any live run.
 
 ---
 
-## §1. File type
+## 0. The one fact that matters most
 
-Comma-delimited plain text. UTF-8. `.SIF` extension. No XML, no JSON.
+**A SIF is a plain delimited TEXT file with a `.SIF` extension — NOT XML.**
+Each record is one line. Each field is **comma-separated**. No tags, no headers row, no JSON, no XML.
 
-## §2. Record types
+If the previous build emitted `<EDR>` / `<SDR>` XML, that output would be rejected by the bank regardless of how correct the numbers were.
 
-| Record | Purpose | Count per file |
-|--------|---------|----------------|
-| `SCR` | Salary Control Record — employer-level header/footer | Exactly 1 |
-| `EDR` | Employee Detail Record — one salary transfer | 1 per employee |
+---
 
-There is no SDR (Salary Detail Record). Earlier versions of this codebase incorrectly used the term — the two record types are SCR and EDR.
+## 1. Record types (correct names)
 
-## §3. SCR — Salary Control Record
+| Code | Name | Count | Holds |
+|---|---|---|---|
+| **SCR** | Salary Control Record | exactly 1 per file | Employer summary + totals the bank validates against |
+| **EDR** | Employee Detail Record | 1 per employee | One employee's salary for the period |
+| **EVP** | Employee Variable Pay (optional) | 0 or 1 per employee | Breakdown of the variable component (allowances etc.) |
 
-One per file. Contains totals that must reconcile with all EDRs.
+> **Correction note:** earlier the project used "EDR = employer, SDR = employee". That is wrong. Correct = **SCR = employer**, **EDR = employee**. There is no "SDR".
 
-| Position | Field | Format | Notes |
-|----------|-------|--------|-------|
-| 0 | Record type | Literal `SCR` | |
-| 1 | EmployerID | 13 chars, zero-padded left | MOHRE establishment ID |
-| 2 | AgentRouting | 9 chars | WPS-approved bank/exchange routing code |
-| 3 | CreationDate | `YYYY-MM-DD` | Must match filename date |
-| 4 | CreationTime | `HH:MM:SS` | Must match filename time |
-| 5 | SalaryMonth | `MMYYYY` | e.g. `042026` for April 2026 |
-| 6 | RecordCount | Integer | Total number of EDR lines in file |
-| 7 | TotalSalary | 2 decimal places, dot separator | Σ EDR(fixed+variable), exact |
-| 8 | Currency | Literal `AED` | |
-| 9 | EmployerName | ≤ 35 chars | Company name_en, truncated if needed |
+---
 
-**Example SCR line:**
+## 2. EDR — Employee Detail Record (one line per employee)
+
+Field order (comma-separated):
+
+| # | Field | Format / Rule |
+|---|---|---|
+| 1 | Record type | literal `EDR` |
+| 2 | Employee / Person ID | 14 digits, **zero-padded** if shorter (from labour card / MOL person ID) |
+| 3 | Agent routing ID | 9-digit routing code of the **employee's** bank/exchange (CBUAE-assigned) |
+| 4 | IBAN | UAE IBAN, 23 chars, `AE` prefix, mod-97 valid |
+| 5 | Pay start date | `YYYY-MM-DD` |
+| 6 | Pay end date | `YYYY-MM-DD` |
+| 7 | Days in period | integer |
+| 8 | Fixed component | decimal, 2 places, no thousands separators (e.g. `4000.00`) |
+| 9 | Variable component | decimal, 2 places (e.g. `2500.00`; `0.00` if none) |
+| 10 | Leave days (without pay) | integer (e.g. `0`) |
+
+**Official example line (Dubai Islamic Bank reference):**
 ```
-SCR,0000000CO00001,000000000,2026-04-27,09:00:00,042026,3,33400.00,AED,Gulf Holdings Company A
-```
-
-## §4. EDR — Employee Detail Record
-
-One line per employee. `fixed + variable` = what transfers to the employee's bank account.
-
-| Position | Field | Format | Notes |
-|----------|-------|--------|-------|
-| 0 | Record type | Literal `EDR` | |
-| 1 | PersonID | 14 chars, zero-padded left | MOHRE person ID (`mohre_person_id`) |
-| 2 | AgentRouting | 9 chars | Employee's bank routing code |
-| 3 | IBAN | 23 chars | UAE format: `AE` + 21 digits |
-| 4 | PayStart | `YYYY-MM-DD` | First day of salary month |
-| 5 | PayEnd | `YYYY-MM-DD` | Last day of salary month |
-| 6 | DaysWorked | Integer | Actual working days in period |
-| 7 | Fixed | 2 decimal places, dot separator | Net fixed pay (basic + allowances − fixed deductions) |
-| 8 | Variable | 2 decimal places, dot separator | Net variable pay (overtime received) |
-| 9 | LeaveDays | Integer | Leave days deducted in this period |
-
-**Example EDR line:**
-```
-EDR,00000000EMP001,000000000,AE070331234567890123456,2026-04-01,2026-04-30,26,14800.00,700.00,0
+EDR,00915012345663,802420101,AE160240043520123456701,2016-01-01,2016-01-31,31,4000.00,2500.00,0
 ```
 
-## §5. Totals rule
+---
+
+## 3. SCR — Salary Control Record (exactly one, employer summary)
+
+| # | Field | Format / Rule |
+|---|---|---|
+| 1 | Record type | literal `SCR` |
+| 2 | Employer ID | 13-digit MOHRE/LRA establishment ID |
+| 3 | Agent routing ID | 9-digit head-office routing code of the agent (CBUAE-assigned) |
+| 4 | File creation date | `YYYY-MM-DD` |
+| 5 | File creation time | `HHMM` *(confirm HHMM vs HHMMSS with your bank — see §6)* |
+| 6 | Salary month | `MMYYYY` (the month being paid) |
+| 7 | Record count | number of EDR records in the file |
+| 8 | Total salary | sum of **all** EDR (fixed + variable), 2 decimals |
+| 9 | Currency | always `AED` |
+| 10 | Employer name | max **35** characters |
+
+**Official example line:**
+```
+SCR,0000000123456,802420101,2016-01-26,1130,012016,01,6500.00,AED,abc company
+```
+(Note: `4000.00 + 2500.00 = 6500.00` → SCR total matches EDR sum. This is the #1 validated rule.)
+
+---
+
+## 4. EVP — Employee Variable Pay (optional)
+
+Used only if you itemize the variable component. Starts with `EVP`, mirrors employee ID + agent ID, then the allowance breakdown. If you are not itemizing allowances, **omit EVP entirely.**
+
+**Official example line:**
+```
+EVP,00915012345663,802420101,500.00,200.00,300.00,0.00,400.00,1100.00,0.00
+```
+
+---
+
+## 5. Hard validation rules (file is rejected if any fail)
+
+1. **Totals:** SCR total salary == Σ (EDR fixed + variable), exact to the fils.
+2. **Count:** SCR record count == number of EDR lines.
+3. **Month match:** SCR salary month (MMYYYY) must match the pay period in every EDR's start/end dates — mismatch rejects the **entire** file.
+4. **IBAN:** valid 23-char UAE IBAN, mod-97 passes.
+5. **Currency:** `AED`.
+6. **Employer name:** ≤ 35 chars.
+7. **Numbers:** no thousands separators, dot as decimal, 2 places on money fields.
+
+---
+
+## 6. Filename convention (the filename is itself validated)
 
 ```
-SCR.TotalSalary = Σ (EDR.Fixed + EDR.Variable) for all EDR lines
+[13-digit Employer ID][YYMMDD creation date][HHMMSS creation time].SIF
 ```
+- Total = **exactly 25 characters** + `.SIF` extension.
+- Example: employer `1234567890123`, created 2026-03-01 08:30:00 →
+  `1234567890123260301083000.SIF`
+- The date & time embedded in the filename **must match** the SCR creation date/time fields, or the file is rejected immediately.
 
-- `fixed = net_salary − overtime_amount`
-- `variable = overtime_amount`
-- `fixed + variable = net_salary` (the bank transfer amount)
+> ⚠️ Source ambiguity to confirm with your bank: filename uses **HHMMSS** (6 digits) but the SCR time field in the DIB example is **HHMM** (4 digits, `1130`). Confirm the exact SCR time format your agent expects so the two stay consistent.
 
-A mismatch means data error upstream. **Never auto-correct.** Escalate.
+---
 
-## §6. Filename convention
+## 7. Record ordering — CONFIRM with your bank
 
-```
-{EmployerID:0>13}{YYMMDD}{HHMMSS}.SIF
-```
+Sources disagree on order:
+- Dubai Islamic Bank guide: **EDR/EVP records first, SCR last.**
+- Some agents/software: **SCR first, then EDR rows.**
 
-- Total: 25 chars before `.SIF` extension
-- `EmployerID`: 13 chars, zero-padded (same as SCR position 1)
-- `YYMMDD`: 2-digit year + 2-digit month + 2-digit day (from SCR CreationDate)
-- `HHMMSS`: 6-digit time (from SCR CreationTime, colons removed)
+This is bank/agent-specific. **Do not hard-code one order blindly** — match your actual agent's template. Make the order a single config value so it can be flipped without touching logic.
 
-**Example:** `0000000CO00001260427090000.SIF`
-(Employer `0000000CO00001`, date `260427` = 27 Apr 2026, time `090000`)
+---
 
-The date/time in the filename **must** exactly match the SCR CreationDate + CreationTime fields.
+## 8. Encryption & submission
 
-## §7. Record order
+- Some banks require the SIF **encrypted** in the standard format before upload — handled at upload, **not** by this worker.
+- The worker's job ends at producing the validated plain `.SIF`. **It never submits, encrypts-for-transport, or pays.** A human uploads via the bank/WPS portal.
 
-Configurable via `SIF_RECORD_ORDER` environment variable:
-- `scr_first` (default): SCR line first, then all EDR lines
-- `scr_last`: all EDR lines first, then SCR line at the end
+---
 
-Different banks require different orderings. Never hard-code. Set per your bank's WPS technical guide.
+## 9. Deadline (for the alert task)
 
-## §8. Money formatting
+- Salaries must flow through WPS within the MOHRE window after the wage due date (commonly cited as 15 days; governed by Ministerial Resolution No. 598 of 2022).
+- Late/non-submission → fines + possible freeze on new work permits. Hence the daily deadline-alert task.
 
-- 2 decimal places
-- Dot (`.`) as decimal separator
-- No thousands separator (no commas, no spaces)
+---
 
-| Correct | Wrong |
-|---------|-------|
-| `4000.00` | `4,000.00` |
-| `150.50` | `150.5` |
-| `9999.99` | `9,999.99` |
+## 10. What stays the same (already correct in the build)
 
-## §9. IBAN validation
+- IBAN mod-97 check ✅
+- BLOCKED on missing IBAN / Emirates ID — never guess ✅
+- SCR total == EDR sum check ✅
+- Negative/zero net → BLOCKED ✅
+- Read-only on system of record, write only to `outputs/` ✅
+- No submit / no pay ✅
 
-1. Must start with `AE`
-2. Must be exactly 23 characters
-3. Must pass mod-97 integrity check (ISO 13616):
-   - Rearrange: move first 4 chars to end
-   - Replace letters: A=10, B=11, ... Z=35
-   - Check: `int(numeric_string) % 97 == 1`
-
-## §10. What to do with the file after generation
-
-1. Human reviews validation report (`{salary_month}_report.md`)
-2. Human reviews SIF content
-3. Human runs SIF through their **bank's own SIF validation tool**
-4. Human submits to bank / MOHRE portal
-
-The worker never reaches step 3 or 4. Its authority ends at step 1.
+**Only the physical writer (XML → delimited `.SIF`), the record names (SCR/EDR), and the filename generator need to change. The validation logic is sound.**
