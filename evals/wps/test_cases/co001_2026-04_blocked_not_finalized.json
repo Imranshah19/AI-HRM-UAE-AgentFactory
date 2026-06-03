@@ -1,0 +1,22 @@
+{
+  "case_id": "co001_2026-04_blocked_not_finalized",
+  "description": "Payroll exists but payment_status is 'draft', not 'finalized'. Worker must STOP immediately and ask HR to finalize — it must NOT generate a SIF from draft payroll.",
+  "ground_truth": "self",
+  "input": {
+    "company_id": "co-001",
+    "salary_month": "2026-04"
+  },
+  "fixture_data": {
+    "payroll_uae": [
+      {"employee_id": "emp-001", "net_salary": "15500.00", "payment_status": "draft", "payroll_month": 4, "payroll_year": 2026, "overtime_amount": "0", "actual_days_worked": 26, "leave_deduction_days": 0}
+    ],
+    "note": "payment_status='draft' — these rows are excluded by the SQL WHERE clause"
+  },
+  "expected": {
+    "status": "BLOCKED",
+    "failing_check": "payroll_finalized",
+    "detail_contains": "finalize payroll",
+    "no_sif_written": true,
+    "no_db_modification": true
+  }
+}

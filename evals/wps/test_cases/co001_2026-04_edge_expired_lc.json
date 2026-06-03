@@ -1,0 +1,30 @@
+{
+  "case_id": "co001_2026-04_edge_expired_lc",
+  "description": "emp-001 has an expired labour card (expiry 2025-01-01, before run date). All other data is valid. Worker must produce READY (not BLOCKED) — expired LC is a WARNING only per spec §8. The flag must appear in the validation report.",
+  "ground_truth": "self",
+  "input": {
+    "company_id": "co-001",
+    "salary_month": "2026-04"
+  },
+  "fixture_data": {
+    "payroll_uae": [
+      {"employee_id": "emp-001", "net_salary": "15500.00", "payment_status": "finalized", "payroll_month": 4, "payroll_year": 2026, "overtime_amount": "0", "actual_days_worked": 26, "leave_deduction_days": 0},
+      {"employee_id": "emp-002", "net_salary": "10600.00", "payment_status": "finalized", "payroll_month": 4, "payroll_year": 2026, "overtime_amount": "0", "actual_days_worked": 26, "leave_deduction_days": 0}
+    ],
+    "employees_uae_profile": [
+      {"employee_id": "emp-001", "bank_iban": "AE070331234567890123456", "emirates_id": "784-1990-1234567-1", "labour_card_number": "", "labour_card_expiry": "2025-01-01", "mohre_person_id": "00000000000001"},
+      {"employee_id": "emp-002", "bank_iban": "__VALID_IBAN_002__",     "emirates_id": "784-1985-7654321-2", "labour_card_number": "", "labour_card_expiry": "2027-06-30", "mohre_person_id": "00000000000002"}
+    ]
+  },
+  "expected": {
+    "status": "READY_FOR_APPROVAL",
+    "check_labour_card_not_expired": {
+      "passed": false,
+      "blocking": false,
+      "flagged_employees": ["emp-001"]
+    },
+    "sif_written": true,
+    "report_contains_warning": true,
+    "invariant": "expired LC must never silently suppress the employee from the SIF"
+  }
+}

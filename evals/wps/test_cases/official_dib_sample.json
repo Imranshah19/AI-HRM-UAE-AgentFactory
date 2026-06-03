@@ -1,0 +1,36 @@
+{
+  "case_id": "official_dib_sample",
+  "description": "Ground-truth case against the bank's own sample SIF file. PENDING — fill this in once you have the official DIB (or your bank's) sample SIF template and run the output through the bank's SIF validation tool.",
+  "ground_truth": "official_sample",
+  "status": "PENDING",
+  "instructions": [
+    "1. Request the official WPS SIF sample file from your bank/agent.",
+    "2. Request the bank's SIF validation tool (or use their online portal).",
+    "3. Reverse-engineer the sample to populate 'fixture_data' below.",
+    "4. Run the worker against that fixture data.",
+    "5. Compare the output line-by-line against the official sample.",
+    "6. Upload the output to the bank's SIF validation tool.",
+    "7. If the tool accepts it → mark status: CONFIRMED and record the result.",
+    "8. Update open assumptions in evals/wps/eval_plan.md §4."
+  ],
+  "known_from_dib_reference": {
+    "scr_example": "SCR,0000000123456,802420101,2016-01-26,1130,012016,01,6500.00,AED,abc company",
+    "edr_example": "EDR,00915012345663,802420101,AE160240043520123456701,2016-01-01,2016-01-31,31,4000.00,2500.00,0",
+    "evp_example": "EVP,00915012345663,802420101,500.00,200.00,300.00,0.00,400.00,1100.00,0.00",
+    "scr_total": "6500.00",
+    "edr_sum": "4000.00 + 2500.00 = 6500.00 (matches SCR total)",
+    "scr_time_format": "HHMM (4 digits: 1130)",
+    "record_order": "EDR/EVP first, SCR last (per DIB guide)",
+    "source": "Dubai Islamic Bank WPS SIF technical guide"
+  },
+  "input": {
+    "company_id": "PENDING",
+    "salary_month": "PENDING"
+  },
+  "fixture_data": "PENDING — populate from official bank sample",
+  "expected": {
+    "bank_validation_tool_result": "ACCEPTED",
+    "confirmed_by": "PENDING",
+    "confirmed_date": "PENDING"
+  }
+}

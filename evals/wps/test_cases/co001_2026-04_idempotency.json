@@ -1,0 +1,28 @@
+{
+  "case_id": "co001_2026-04_idempotency",
+  "description": "Run the worker twice for the same company + month. Second run must produce identical output (same filename, same SIF content, same SCR total). No duplicate SIF files. No double-submission possible (worker cannot submit).",
+  "ground_truth": "self",
+  "input": {
+    "company_id": "co-001",
+    "salary_month": "2026-04"
+  },
+  "test_procedure": [
+    "1. Run worker → capture sif_path_1, sif_content_1, total_1",
+    "2. Wait at least 1 second (timestamp will differ)",
+    "3. Run worker again → capture sif_path_2, sif_content_2, total_2",
+    "4. Assert: total_1 == total_2",
+    "5. Assert: sif_content_1 SCR total field == sif_content_2 SCR total field",
+    "6. Assert: outputs/wps/co-001/ contains exactly ONE .SIF file (overwritten, not duplicated)",
+    "7. Assert: worker never submitted or paid on either run"
+  ],
+  "note": "Filename will differ between runs (HHMMSS changes) but contents are logically identical. The outputs/ directory must not accumulate unbounded SIF files — only the latest overwrites.",
+  "expected": {
+    "status_run1": "READY_FOR_APPROVAL",
+    "status_run2": "READY_FOR_APPROVAL",
+    "total_run1": "33400.00",
+    "total_run2": "33400.00",
+    "scr_total_same": true,
+    "no_payment_on_either_run": true,
+    "no_db_modification_on_either_run": true
+  }
+}

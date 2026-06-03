@@ -1,0 +1,93 @@
+{
+  "case_id": "co001_2026-04_happy",
+  "description": "Happy path — 3 employees, all data valid, finalized payroll. Worker must produce READY status with SCR total exactly 33400.00.",
+  "ground_truth": "self",
+  "input": {
+    "company_id": "co-001",
+    "salary_month": "2026-04"
+  },
+  "fixture_data": {
+    "companies": [
+      {
+        "id": "co-001",
+        "name_en": "Gulf Holdings Company A",
+        "mohre_establishment_id": "CO00001",
+        "wps_agent_bank": "033000000",
+        "is_active": true
+      }
+    ],
+    "payroll_uae": [
+      {
+        "employee_id": "emp-001", "company_id": "co-001",
+        "payroll_month": 4, "payroll_year": 2026,
+        "net_salary": "15500.00", "overtime_amount": "700.00",
+        "actual_days_worked": 26, "leave_deduction_days": 0,
+        "payment_status": "finalized"
+      },
+      {
+        "employee_id": "emp-002", "company_id": "co-001",
+        "payroll_month": 4, "payroll_year": 2026,
+        "net_salary": "10600.00", "overtime_amount": "0.00",
+        "actual_days_worked": 26, "leave_deduction_days": 0,
+        "payment_status": "finalized"
+      },
+      {
+        "employee_id": "emp-003", "company_id": "co-001",
+        "payroll_month": 4, "payroll_year": 2026,
+        "net_salary": "7300.00", "overtime_amount": "0.00",
+        "actual_days_worked": 24, "leave_deduction_days": 2,
+        "payment_status": "finalized"
+      }
+    ],
+    "employees_uae_profile": [
+      {
+        "employee_id": "emp-001", "company_id": "co-001",
+        "bank_iban": "AE070331234567890123456",
+        "emirates_id": "784-1990-1234567-1",
+        "labour_card_number": "", "labour_card_expiry": "2027-12-31",
+        "mohre_person_id": "00000000000001"
+      },
+      {
+        "employee_id": "emp-002", "company_id": "co-001",
+        "bank_iban": "__VALID_IBAN_002__",
+        "emirates_id": "784-1985-7654321-2",
+        "labour_card_number": "", "labour_card_expiry": "2027-06-30",
+        "mohre_person_id": "00000000000002"
+      },
+      {
+        "employee_id": "emp-003", "company_id": "co-001",
+        "bank_iban": "__VALID_IBAN_003__",
+        "emirates_id": "", "labour_card_number": "LC-20240001",
+        "labour_card_expiry": "2027-03-31",
+        "mohre_person_id": "00000000000003"
+      }
+    ]
+  },
+  "note_on_ibans": "IBAN_002 and IBAN_003 must be computed via _make_valid_iban() in the test file — see evals/test_cases/test_wps_worker.py",
+  "expected": {
+    "status": "READY_FOR_APPROVAL",
+    "total_sif_aed": "33400.00",
+    "total_payroll_aed": "33400.00",
+    "blocked_employees": [],
+    "sif_content_rules": [
+      "exactly 1 SCR line",
+      "exactly 3 EDR lines",
+      "SCR field[7] (totalSalary) == '33400.00'",
+      "SCR field[5] (salaryMonth) == '042026'",
+      "no XML tags in output",
+      "filename base is exactly 25 chars"
+    ],
+    "checks_all_pass": [
+      "payroll_finalized",
+      "all_employees_included",
+      "iban_valid",
+      "id_present",
+      "amounts_match",
+      "establishment_id",
+      "no_negative_zero_net",
+      "employer_name_length",
+      "month_match",
+      "sif_format"
+    ]
+  }
+}
